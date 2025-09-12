@@ -22,7 +22,7 @@ int stream_file_to_socket(int sockfd, const char *file_path,
 	}
 	off_t file_size = st.st_size;
 	off_t offset = 0;
-	// Use sendfile if available
+
 	while (offset < file_size) {
 		ssize_t sent = sendfile(sockfd, fd, &offset, file_size - offset);
 		if (sent <= 0) {

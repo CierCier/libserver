@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Forward declarations
+// just some helpers
 static void skip_ws(const char **p);
 static struct JsonValue *parse_value(const char **p);
 static struct JsonValue *parse_object(const char **p);
@@ -126,11 +126,11 @@ char *json_serialize(const struct JsonValue *value) {
 				while (entry) {
 					if (emitted++ > 0)
 						sb_append(sb, ",");
-					// Serialize key
+
 					sb_append(sb, "\"");
 					append_escaped_string(sb, entry->key);
 					sb_append(sb, "\":");
-					// Serialize value
+
 					char *val_str =
 						json_serialize((const struct JsonValue *)entry->value);
 					if (!val_str) {
@@ -332,7 +332,8 @@ static char hex_to_char(const char *h4, int *ok) {
 		v = (v << 4) | d;
 	}
 	if (v <= 0xFF)
-		return (char)v; // simplistic; not full UTF-16 handling
+		return (char)v;
+	// not full UTF-16 handling , i dont want to ever deal with that
 	return '?';
 }
 
@@ -517,7 +518,7 @@ static struct JsonValue *parse_object(const char **p) {
 	if (expect_char(p, '}'))
 		return v; // empty object
 	while (1) {
-		// key string
+
 		struct JsonValue *k = parse_string(p);
 		if (!k || k->type != JSON_STRING) {
 			if (k)
@@ -540,7 +541,7 @@ static struct JsonValue *parse_object(const char **p) {
 		}
 		// put into map (duplicate key string for map)
 		map_put(v->object_value, k->string_value, val);
-		json_free(k); // frees key string
+		json_free(k);
 		skip_ws(p);
 		if (expect_char(p, '}'))
 			break;
