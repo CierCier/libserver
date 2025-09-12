@@ -18,6 +18,8 @@ struct Server {
 
 	struct Map
 		*endpoints; // Map of endpoints (key: path+method, value: EndPoint*)
+
+	struct EndPoint *not_found_endpoint; // Custom 404 handler endpoint
 };
 
 void server_init(struct Server *server, const char *address, int port);

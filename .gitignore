@@ -1,5 +1,5 @@
 .clangd/
 .cache/
 .vscode/
-.build/
+build/
 server.log

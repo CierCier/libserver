@@ -100,8 +100,3 @@ struct Response *create_http_response(int status_code, const char *body);
 void free_http_response(struct Response *response);
 
 void send_http_response(int client_sock, struct Response *response);
-
-// Common utility functions
-size_t get_file_size(const char *file_path);
-bool file_exists(const char *file_path);
-char *read_file(const char *file_path);

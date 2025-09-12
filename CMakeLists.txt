@@ -27,6 +27,10 @@ target_compile_options(server PRIVATE -pthread)
 target_include_directories(server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 
+
+include(CTest)
+enable_testing()
+
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
 

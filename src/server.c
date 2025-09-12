@@ -15,6 +15,8 @@ void handle_client(void *arg) {
 	void **args = (void **)arg;
 	struct Server *server = (struct Server *)args[0];
 	int client_sock = *(int *)args[1];
+
+	free(args[1]);
 	free(arg);
 
 	char buffer[4096];
@@ -44,11 +46,13 @@ void handle_client(void *arg) {
 		app_log(LOG_LEVEL_INFO, "Handling request for %s", request->path);
 		response = endpoint->handler(request);
 	} else {
-		char not_found_msg[256];
-		snprintf(not_found_msg, sizeof(not_found_msg), "Endpoint %s not found",
-				 request->path);
-		response = create_http_response(404, not_found_msg);
-		app_log(LOG_LEVEL_WARNING, "404 Not Found: %s", request->path);
+		app_log(LOG_LEVEL_WARNING, "No handler for %s, using 404",
+				request->path);
+		if (server->not_found_endpoint && server->not_found_endpoint->handler) {
+			response = server->not_found_endpoint->handler(request);
+		} else {
+			response = create_http_response(404, "Not Found");
+		}
 	}
 	if (!response) {
 		app_log(LOG_LEVEL_ERROR, "Handler returned NULL response, %s",
@@ -62,6 +66,11 @@ void handle_client(void *arg) {
 	free_http_request(request);
 	free_http_response(response);
 	close(client_sock);
+}
+
+static struct Response *__not_found_handler_default(struct Request *request) {
+	(void)request;
+	return create_http_response(404, "Not Found");
 }
 
 void server_init(struct Server *server, const char *address, int port) {
@@ -80,6 +89,9 @@ void server_init(struct Server *server, const char *address, int port) {
 
 	server->endpoints = malloc(sizeof(struct Map));
 	map_init(server->endpoints, 53);
+
+	server->not_found_endpoint =
+		endpoint_create(HTTP_GET, "/404", __not_found_handler_default);
 }
 
 void server_destroy(struct Server *server) {
@@ -113,16 +125,22 @@ void server_start(struct Server *server) {
 		return;
 
 	// Create socket
-	int opt = 1;
-	setsockopt(server->sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 	server->sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (server->sockfd < 0) {
 		app_log(LOG_LEVEL_ERROR, "Failed to create socket");
 		return;
 	}
 
+	// Allow quick reuse of the address/port
+	int opt = 1;
+	if (setsockopt(server->sockfd, SOL_SOCKET, SO_REUSEADDR, &opt,
+				   sizeof(opt)) < 0) {
+		app_log(LOG_LEVEL_WARNING, "setsockopt(SO_REUSEADDR) failed");
+	}
+
 	// Bind socket
 	struct sockaddr_in serv_addr;
+	memset(&serv_addr, 0, sizeof(serv_addr));
 	serv_addr.sin_family = AF_INET;
 	serv_addr.sin_addr.s_addr = inet_addr(server->address);
 	serv_addr.sin_port = htons(server->port);

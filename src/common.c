@@ -1,5 +1,10 @@
+// Efficiently stream a file to a socket (returns 0 on success, -1 on error)
 #include "common.h"
 #include "map.h"
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include <pthread.h>
 #include <stdio.h>
@@ -356,9 +361,43 @@ void send_http_response(int client_sock, struct Response *response) {
 		return;
 
 	// Simple HTTP response format
+	const char *reason = "OK";
+	switch (response->status_code) {
+	case 200:
+		reason = "OK";
+		break;
+	case 201:
+		reason = "Created";
+		break;
+	case 204:
+		reason = "No Content";
+		break;
+	case 400:
+		reason = "Bad Request";
+		break;
+	case 401:
+		reason = "Unauthorized";
+		break;
+	case 403:
+		reason = "Forbidden";
+		break;
+	case 404:
+		reason = "Not Found";
+		break;
+	case 405:
+		reason = "Method Not Allowed";
+		break;
+	case 500:
+		reason = "Internal Server Error";
+		break;
+	default:
+		reason = "OK";
+		break;
+	}
+
 	char status_line[256];
-	snprintf(status_line, sizeof(status_line), "HTTP/1.1 %d OK\r\n",
-			 response->status_code);
+	snprintf(status_line, sizeof(status_line), "HTTP/1.1 %d %s\r\n",
+			 response->status_code, reason);
 	write(client_sock, status_line, strlen(status_line));
 
 	// Content-Length header
@@ -367,6 +406,14 @@ void send_http_response(int client_sock, struct Response *response) {
 			 strlen(response->body ? response->body : ""));
 	write(client_sock, content_length, strlen(content_length));
 
+	// Default Content-Type header (text/plain; charset=utf-8)
+	const char *content_type = "Content-Type: text/plain; charset=utf-8\r\n";
+	write(client_sock, content_type, strlen(content_type));
+
+	// Indicate we will close the connection
+	const char *conn_close = "Connection: close\r\n";
+	write(client_sock, conn_close, strlen(conn_close));
+
 	// End headers
 	write(client_sock, "\r\n", 2);
 
@@ -374,53 +421,4 @@ void send_http_response(int client_sock, struct Response *response) {
 	if (response->body) {
 		write(client_sock, response->body, strlen(response->body));
 	}
-}
-
-// File utility functions
-size_t get_file_size(const char *file_path) {
-	if (!file_path)
-		return 0;
-	FILE *file = fopen(file_path, "rb");
-	if (!file)
-		return 0;
-
-	fseek(file, 0, SEEK_END);
-	size_t size = ftell(file);
-	fclose(file);
-	return size;
-}
-
-bool file_exists(const char *file_path) {
-	if (!file_path)
-		return false;
-	FILE *file = fopen(file_path, "r");
-	if (file) {
-		fclose(file);
-		return true;
-	}
-	return false;
-}
-
-char *read_file(const char *file_path) {
-	if (!file_path)
-		return NULL;
-
-	FILE *file = fopen(file_path, "rb");
-	if (!file)
-		return NULL;
-
-	fseek(file, 0, SEEK_END);
-	size_t size = ftell(file);
-	fseek(file, 0, SEEK_SET);
-
-	char *content = malloc(size + 1);
-	if (!content) {
-		fclose(file);
-		return NULL;
-	}
-
-	fread(content, 1, size, file);
-	content[size] = '\0';
-	fclose(file);
-	return content;
 }

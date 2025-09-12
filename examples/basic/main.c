@@ -46,9 +46,6 @@ struct Response *echo_handler(struct Request *request) {
 
 int main() {
 	logger_init(LOG_LEVEL_DEBUG, "server.log");
-
-	printf("Starting basic libserver example...\n");
-
 	struct Server server;
 	server_init(&server, "127.0.0.1", 8080);
 

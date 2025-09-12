@@ -61,7 +61,13 @@ endfunction()
 
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/examples)
 
+
 add_examples()
+
+# Add CTest for json_demo if built
+if(TARGET example_json_demo)
+    add_test(NAME json_demo COMMAND example_json_demo)
+endif()
 
 # Print summary
 message(STATUS "Examples configuration complete")
