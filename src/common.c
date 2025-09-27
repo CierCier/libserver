@@ -1,4 +1,3 @@
-// Efficiently stream a file to a socket (returns 0 on success, -1 on error)
 #include "common.h"
 #include "map.h"
 #include <fcntl.h>
@@ -10,7 +9,124 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
+
+static bool compile_route_pattern(const char *path, regex_t *out_regex,
+								  char ***out_param_names,
+								  size_t *out_param_count, bool *out_is_pat) {
+	// Detect if the path has any ":param" segments
+	bool has_param = strchr(path, ':') != NULL;
+	if (out_is_pat)
+		*out_is_pat = has_param;
+	if (!has_param) {
+		// No pattern; regex not needed
+		if (out_param_names)
+			*out_param_names = NULL;
+		if (out_param_count)
+			*out_param_count = 0;
+		return true;
+	}
+
+	// Build a regex from the path
+	// Replace each ":name" with "([^/]+)" and record the name
+	// Ensure full match with ^...$
+	size_t len = strlen(path);
+	// Rough upper bound for regex buffer: len * 4 + 10
+	size_t cap = len * 4 + 16;
+	char *regex_buf = malloc(cap);
+	if (!regex_buf)
+		return false;
+	size_t ri = 0;
+	size_t param_cap = 4, param_count = 0;
+	char **param_names = malloc(param_cap * sizeof(char *));
+	if (!param_names) {
+		free(regex_buf);
+		return false;
+	}
+
+	regex_buf[ri++] = '^';
+	for (size_t i = 0; i < len; i++) {
+		char c = path[i];
+		if (c == ':') {
+			// Read param name
+			size_t start = ++i;
+			while (i < len && path[i] != '/' && path[i] != 0)
+				i++;
+			size_t plen = i - start;
+			char *pname = malloc(plen + 1);
+			if (!pname) {
+				// cleanup
+				for (size_t k = 0; k < param_count; k++)
+					free(param_names[k]);
+				free(param_names);
+				free(regex_buf);
+				return false;
+			}
+			memcpy(pname, &path[start], plen);
+			pname[plen] = '\0';
+			if (param_count == param_cap) {
+				param_cap *= 2;
+				char **tmp = realloc(param_names, param_cap * sizeof(char *));
+				if (!tmp) {
+					for (size_t k = 0; k < param_count; k++)
+						free(param_names[k]);
+					free(param_names);
+					free(regex_buf);
+					free(pname);
+					return false;
+				}
+				param_names = tmp;
+			}
+			param_names[param_count++] = pname;
+			// Append capture group
+			const char *capgrp = "([^/]+)";
+			size_t cglen = strlen(capgrp);
+			memcpy(&regex_buf[ri], capgrp, cglen);
+			ri += cglen;
+			i--; // step back so outer loop advances to '/' or end
+		} else {
+			// Escape regex special chars except '/'
+			if (strchr(".^$|()[]{}+?\\", c)) {
+				regex_buf[ri++] = '\\';
+			}
+			regex_buf[ri++] = c;
+		}
+		if (ri + 8 >= cap) {
+			cap *= 2;
+			char *tmpb = realloc(regex_buf, cap);
+			if (!tmpb) {
+				for (size_t k = 0; k < param_count; k++)
+					free(param_names[k]);
+				free(param_names);
+				free(regex_buf);
+				return false;
+			}
+			regex_buf = tmpb;
+		}
+	}
+	regex_buf[ri++] = '$';
+	regex_buf[ri] = '\0';
+
+	int rc = regcomp(out_regex, regex_buf, REG_EXTENDED);
+	free(regex_buf);
+	if (rc != 0) {
+		for (size_t k = 0; k < param_count; k++)
+			free(param_names[k]);
+		free(param_names);
+		return false;
+	}
+	if (out_param_names)
+		*out_param_names = param_names;
+	else {
+		for (size_t k = 0; k < param_count; k++)
+			free(param_names[k]);
+		free(param_names);
+	}
+	if (out_param_count)
+		*out_param_count = param_count;
+	return true;
+}
 
 struct EndPoint *endpoint_create(HttpMethod method, const char *path,
 								 RequestHandler handler) {
@@ -21,6 +137,14 @@ struct EndPoint *endpoint_create(HttpMethod method, const char *path,
 	endpoint->method = method;
 	endpoint->path = str_duplicate(path);
 	endpoint->handler = handler;
+	endpoint->param_names = NULL;
+	endpoint->param_count = 0;
+	endpoint->is_pattern = false;
+	memset(&endpoint->regex, 0, sizeof(regex_t));
+
+	// compile pattern if contains :params
+	compile_route_pattern(path, &endpoint->regex, &endpoint->param_names,
+						  &endpoint->param_count, &endpoint->is_pattern);
 
 	return endpoint;
 }
@@ -28,6 +152,12 @@ struct EndPoint *endpoint_create(HttpMethod method, const char *path,
 void endpoint_destroy(struct EndPoint *endpoint) {
 	if (endpoint) {
 		free(endpoint->path);
+		if (endpoint->is_pattern) {
+			regfree(&endpoint->regex);
+			for (size_t i = 0; i < endpoint->param_count; i++)
+				free(endpoint->param_names[i]);
+			free(endpoint->param_names);
+		}
 		free(endpoint);
 	}
 }
@@ -252,6 +382,8 @@ struct Request *parse_http_request(const char *raw_request) {
 	map_init(request->headers, 17);
 	request->query_params = malloc(sizeof(struct Map));
 	map_init(request->query_params, 17);
+	request->params = malloc(sizeof(struct Map));
+	map_init(request->params, 7);
 
 	// Parse the request line (first line)
 	char *request_copy = str_duplicate(raw_request);
@@ -327,6 +459,19 @@ void free_http_request(struct Request *request) {
 		free(request->query_params);
 	}
 
+	// Clean up params map
+	if (request->params) {
+		for (size_t i = 0; i < request->params->bucket_count; i++) {
+			struct MapEntry *entry = request->params->buckets[i];
+			while (entry) {
+				free(entry->value);
+				entry = entry->next;
+			}
+		}
+		map_destroy(request->params);
+		free(request->params);
+	}
+
 	// Clean up headers map
 	if (request->headers) {
 		map_destroy(request->headers);
@@ -360,7 +505,6 @@ void send_http_response(int client_sock, struct Response *response) {
 	if (!response || client_sock < 0)
 		return;
 
-	// Simple HTTP response format
 	const char *reason = "OK";
 	switch (response->status_code) {
 	case 200:
@@ -406,9 +550,29 @@ void send_http_response(int client_sock, struct Response *response) {
 			 strlen(response->body ? response->body : ""));
 	write(client_sock, content_length, strlen(content_length));
 
-	// Default Content-Type header (text/plain; charset=utf-8)
-	const char *content_type = "Content-Type: text/plain; charset=utf-8\r\n";
-	write(client_sock, content_type, strlen(content_type));
+	// Write custom headers from response->headers; track if Content-Type set
+	bool has_content_type = false;
+	for (size_t i = 0; i < response->headers->bucket_count; i++) {
+		struct MapEntry *entry = response->headers->buckets[i];
+		while (entry) {
+			const char *k = entry->key;
+			const char *v = (const char *)entry->value;
+			if (k && v) {
+				if (strcasecmp(k, "Content-Type") == 0) {
+					has_content_type = true;
+				}
+				char header_line[1024];
+				snprintf(header_line, sizeof(header_line), "%s: %s\r\n", k, v);
+				write(client_sock, header_line, strlen(header_line));
+			}
+			entry = entry->next;
+		}
+	}
+	if (!has_content_type) {
+		const char *content_type =
+			"Content-Type: text/plain; charset=utf-8\r\n";
+		write(client_sock, content_type, strlen(content_type));
+	}
 
 	// Indicate we will close the connection
 	const char *conn_close = "Connection: close\r\n";

@@ -3,7 +3,18 @@
 #include "map.h"
 #include "server.h"
 #include <log.h>
-#include <stdio.h>
+#include <stdlib.h>
+
+static void json_header_mw(struct Request *req, struct Response **res,
+						   bool *stop, void *ud) {
+	(void)req;
+	(void)stop;
+	(void)ud;
+	if (*res && (*res)->headers) {
+		map_put((*res)->headers, "Content-Type",
+				"application/json; charset=utf-8");
+	}
+}
 
 struct Response *ping_handler(struct Request *request) {
 	(void)request;
@@ -15,24 +26,23 @@ struct Response *ping_handler(struct Request *request) {
 
 	char *response_body = json_serialize(response_json);
 	json_free(response_json);
-	return create_http_response(200, response_body);
+	struct Response *r = create_http_response(200, response_body);
+	map_put(r->headers, "Content-Type", "application/json; charset=utf-8");
+	free(response_body);
+	return r;
 }
 
 struct Response *not_found_handler(struct Request *request) {
 	(void)request;
-
-	static int initialized = 0;
-	static struct JsonValue *response_json = NULL;
-	if (!initialized) {
-		response_json = json_create_object();
-		map_put(response_json->object_value, "error",
-				json_create_string("Not Found"));
-		initialized = 1;
-	}
-
+	struct JsonValue *response_json = json_create_object();
+	map_put(response_json->object_value, "error",
+			json_create_string("Not Found"));
 	char *response_body = json_serialize(response_json);
 	json_free(response_json);
-	return create_http_response(404, response_body);
+	struct Response *r = create_http_response(404, response_body);
+	map_put(r->headers, "Content-Type", "application/json; charset=utf-8");
+	free(response_body);
+	return r;
 }
 
 int main(int argc, char **argv) {
@@ -40,11 +50,21 @@ int main(int argc, char **argv) {
 	struct Server server;
 	server_init(&server, "127.0.0.1", 8080);
 
-	struct EndPoint *ping_endpoint =
-		endpoint_create(HTTP_GET, "/ping", ping_handler);
+	// Set custom 404
+	static struct EndPoint nep = {HTTP_GET, "/404", not_found_handler};
+	server.not_found_endpoint = &nep;
 
-	server_add_endpoint(&server, ping_endpoint);
-	server_start(&server);
+	server_use(&server, json_header_mw, NULL);
+
+	// Use a router for API endpoints
+	struct Router *api = router_create();
+	router_add(api, HTTP_GET, "/ping", ping_handler);
+	server_mount_router(&server, "/api", api);
+
+	// Optional: keep /ping at root as well
+	server_add_endpoint(&server, HTTP_GET, "/ping", ping_handler);
+
+	server_start(&server); // no return
 
 	return -1;
 }

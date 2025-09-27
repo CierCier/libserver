@@ -22,7 +22,10 @@ file(GLOB_RECURSE SERVER_SRC src/*.c)
 
 add_library(server SHARED ${SERVER_SRC})
 target_compile_definitions(server PRIVATE _POSIX_C_SOURCE=200112L)
+target_compile_definitions(server PRIVATE _MIN_THREAD_COUNT=64)
 target_compile_options(server PRIVATE -pthread)
+
+
 
 target_include_directories(server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 

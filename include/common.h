@@ -1,6 +1,7 @@
 #pragma once
 
 #include <pthread.h>
+#include <regex.h>
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -18,6 +19,7 @@ struct Request {
 		*headers; // Map of headers (key: header name, value: header value)
 	struct Map *query_params; // Map of query parameters (key: param name,
 							  // value: param value)
+	struct Map *params;		  // Map of path parameters (e.g., id -> "123")
 };
 
 struct Response {
@@ -37,8 +39,14 @@ typedef struct Response *(*RequestHandler)(struct Request *request);
 
 struct EndPoint {
 	HttpMethod method;
-	char *path;
-	RequestHandler handler;
+	char *path;				// original pattern, e.g., "/user/:id"
+	RequestHandler handler; // user handler
+
+	// Compiled regex and parameter metadata derived from path
+	regex_t regex;		// e.g., ^/user/([^/]+)$
+	char **param_names; // ["id", ...]
+	size_t param_count; // number of capture groups
+	bool is_pattern;	// true if path contains ':' params
 };
 
 /*

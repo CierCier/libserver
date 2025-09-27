@@ -1,47 +1,41 @@
+#include "json.h"
 #include <log.h>
 #include <map.h>
 #include <server.h>
 #include <stdio.h>
+#include <stdlib.h>
+
+static void json_header_mw(struct Request *req, struct Response **res,
+						   bool *stop, void *user_data) {
+	(void)req;
+	(void)stop;
+	(void)user_data;
+	if (*res && (*res)->headers) {
+		map_put((*res)->headers, "Content-Type",
+				"application/json; charset=utf-8");
+	}
+}
 
 struct Response *hello_handler(struct Request *request) {
 	(void)request;
-	return create_http_response(200, "Hello, World from libserver!");
+	return create_http_response(200, "Hello, World!");
 }
 
-struct Response *status_handler(struct Request *request) {
-	(void)request;
-	return create_http_response(
-		200, "{\"status\": \"OK\", \"message\": \"Server is running\"}");
-}
+struct Response *param_route(struct Request *request) {
+	char *id = (char *)map_get(request->params, "id");
+	char buff[256];
 
-struct Response *echo_handler(struct Request *request) {
-	if (!request || !request->query_params) {
-		return create_http_response(400, "Invalid request");
-	}
+	struct JsonValue *response_json = json_create_object();
+	map_put(response_json->object_value, "id", json_create_string(id));
 
-	char *message = (char *)map_get(request->query_params, "message");
-	char *name = (char *)map_get(request->query_params, "name");
+	snprintf(buff, 256, "Hello, user %s!", id ? id : "unknown");
+	map_put(response_json->object_value, "message", json_create_string(buff));
 
-	char response_body[1024];
-	if (message && name) {
-		snprintf(response_body, sizeof(response_body),
-				 "{\"echo\": \"%s\", \"name\": \"%s\", \"full_message\": "
-				 "\"Hello %s, you said: %s\"}",
-				 message, name, name, message);
-	} else if (message) {
-		snprintf(response_body, sizeof(response_body),
-				 "{\"echo\": \"%s\", \"message\": \"You said: %s\"}", message,
-				 message);
-	} else if (name) {
-		snprintf(response_body, sizeof(response_body),
-				 "{\"name\": \"%s\", \"message\": \"Hello %s!\"}", name, name);
-	} else {
-		snprintf(response_body, sizeof(response_body),
-				 "{\"message\": \"No query parameters provided. Try: "
-				 "/api/echo?message=hello&name=world\"}");
-	}
-
-	return create_http_response(200, response_body);
+	struct Response *r =
+		create_http_response(200, json_serialize(response_json));
+	json_free(response_json);
+	map_put(r->headers, "Content-Type", "application/json; charset=utf-8");
+	return r;
 }
 
 int main() {
@@ -49,31 +43,26 @@ int main() {
 	struct Server server;
 	server_init(&server, "127.0.0.1", 8080);
 
-	struct EndPoint *hello_endpoint =
-		endpoint_create(HTTP_GET, "/", hello_handler);
-	struct EndPoint *status_endpoint =
-		endpoint_create(HTTP_GET, "/api/status", status_handler);
-	struct EndPoint *echo_endpoint =
-		endpoint_create(HTTP_GET, "/api/echo", echo_handler);
+	// Global JSON header middleware
+	server_use(&server, json_header_mw, NULL);
 
-	server_add_endpoint(&server, hello_endpoint);
-	server_add_endpoint(&server, status_endpoint);
-	server_add_endpoint(&server, echo_endpoint);
+	// Mount /api router and add routes
+	struct Router *api = router_create();
+	router_use(api, json_header_mw, NULL);
+	server_mount_router(&server, "/api", api);
 
-	printf("Server configured with endpoints:\n");
-	printf("  GET / - Hello World\n");
-	printf("  GET /api/status - Status check\n");
-	printf("  GET /api/echo - Echo with query parameters\n");
-	printf("    Example: /api/echo?message=hello&name=world\n");
-	printf("\nStarting server on http://127.0.0.1:8080\n");
-	printf("Press Ctrl+C to stop the server\n\n");
+	// Parameterized route
+	router_add(api, HTTP_GET, "/users/:id", param_route);
+
+	// Root without router
+	server_add_endpoint(&server, HTTP_GET, "/", hello_handler);
 
 	server_start(&server); // Essentially an __no_return
 
 	// Cleanup (this won't be reached unless server_start returns)
-	// --- IGNORE ---
 
 	server_destroy(&server);
+	router_destroy(api);
 	logger_cleanup();
 
 	return 0;
