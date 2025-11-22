@@ -7,14 +7,10 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 FIND_PACKAGE(Threads REQUIRED)
-FIND_PACKAGE(PkgConfig REQUIRED)
+#FIND_PACKAGE(PkgConfig REQUIRED)
 
 
-pkg_check_modules(
-    deps
-    REQUIRED
-    IMPORTED_TARGET
-)
+#pkg_check_modules( deps REQUIRED IMPORTED_TARGET)
 
 
 file(GLOB_RECURSE SERVER_SRC src/*.c)
@@ -38,7 +34,7 @@ set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
 
 
-TARGET_LINK_LIBRARIES(server PkgConfig::deps)
+# TARGET_LINK_LIBRARIES(server PkgConfig::deps)
 TARGET_LINK_LIBRARIES(server pthread ${CMAKE_THREAD_LIBS_INIT})
 
 # Add examples subdirectory

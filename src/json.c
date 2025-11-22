@@ -18,6 +18,8 @@ static int expect_char(const char **p, char c);
 static char hex_to_char(const char *h4, int *ok);
 static void append_escaped_string(struct StringBuilder *sb, const char *s);
 
+static struct JsonValue g_null_instance = {.type = JSON_NULL};
+
 struct JsonValue *json_parse(const char *json_str) {
 	if (!json_str)
 		return NULL;
@@ -155,7 +157,7 @@ char *json_serialize(const struct JsonValue *value) {
 }
 
 void json_free(struct JsonValue *value) {
-	if (!value)
+	if (!value || value == &g_null_instance)
 		return;
 	switch (value->type) {
 	case JSON_STRING:
@@ -308,7 +310,7 @@ static struct JsonValue *parse_value(const char **p) {
 		return v;
 	}
 	if (match(p, "null")) {
-		return make_value(JSON_NULL);
+		return json_create_null();
 	}
 	return NULL;
 }
@@ -590,9 +592,10 @@ static void append_escaped_string(struct StringBuilder *sb, const char *s) {
 	}
 }
 
+
+
 struct JsonValue *json_create_null() {
-	static struct JsonValue null_instance = {.type = JSON_NULL};
-	return &null_instance;
+	return &g_null_instance;
 }
 
 struct JsonValue *json_create_bool(int bool_value) {
