@@ -1,5 +1,8 @@
+#define _GNU_SOURCE
 #include "common.h"
 #include "protocols/ftp.h"
+#include "protocols/ftp_http.h"
+#include "stringbuilder.h"
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
@@ -10,6 +13,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <limits.h>
 
 struct S_FtpCommand *parse_ftp_command(const char *cmd_str) {
 	if (!cmd_str)
@@ -58,6 +62,12 @@ struct S_FtpCommand *parse_ftp_command(const char *cmd_str) {
 			cmd->command = FTP_CMD_PASV;
 		else if (strcmp(token, "GET") == 0)
 			cmd->command = FTP_CMD_HTTP_GET;
+		else if (strcmp(token, "MKD") == 0)
+			cmd->command = FTP_CMD_MKD;
+		else if (strcmp(token, "RMD") == 0)
+			cmd->command = FTP_CMD_RMD;
+		else if (strcmp(token, "DELE") == 0)
+			cmd->command = FTP_CMD_DELE;
 
 		// Get argument
 		const char *arg_start = strchr(cmd_str, ' ');
@@ -66,6 +76,7 @@ struct S_FtpCommand *parse_ftp_command(const char *cmd_str) {
 				arg_start++;
 			strncpy(cmd->argument, arg_start, FTP_BUFFER_SIZE - 1);
 			// Trim trailing CRLF
+			// Fuck DOS ig
 			char *end = cmd->argument + strlen(cmd->argument) - 1;
 			while (end > cmd->argument && isspace((unsigned char)*end)) {
 				*end = '\0';
@@ -142,23 +153,42 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 		break;
 	case FTP_CMD_PWD: {
 		char resp[FTP_BUFFER_SIZE];
-		snprintf(resp, sizeof(resp), "257 \"%s\"", ctx->current_dir[0] ? ctx->current_dir : "/");
+		// Return absolute path for now, or strip root if we tracked it
+		snprintf(resp, sizeof(resp), "257 \"%s\"", ctx->current_dir);
 		send_ftp_response(client_sock, resp);
 		break;
 	}
-	case FTP_CMD_CWD:
-		// Simplified CWD: just update current_dir if it exists
-		// In a real server, we would check if the directory exists
+	case FTP_CMD_CWD: {
+		char new_path[PATH_MAX];
 		if (cmd->argument[0] == '/') {
-			strncpy(ctx->current_dir, cmd->argument, sizeof(ctx->current_dir) - 1);
+			snprintf(new_path, sizeof(new_path), "%s", cmd->argument); // Treat as absolute
 		} else {
-			// Handle relative path (simplified)
-			if (strcmp(ctx->current_dir, "/") != 0)
-				strncat(ctx->current_dir, "/", sizeof(ctx->current_dir) - strlen(ctx->current_dir) - 1);
-			strncat(ctx->current_dir, cmd->argument, sizeof(ctx->current_dir) - strlen(ctx->current_dir) - 1);
+			snprintf(new_path, sizeof(new_path), "%s/%s", ctx->current_dir, cmd->argument);
 		}
-		send_ftp_response(client_sock, FTP_RESP_200);
+		
+		char resolved[PATH_MAX];
+		if (realpath(new_path, resolved) && access(resolved, F_OK) == 0) {
+			// Security check: ensure we are still within root_dir
+			size_t root_len = strlen(ctx->root_dir);
+			if (strncmp(resolved, ctx->root_dir, root_len) != 0 || 
+				(resolved[root_len] != '\0' && resolved[root_len] != '/')) {
+				send_ftp_response(client_sock, FTP_RESP_550);
+				break;
+			}
+
+			struct stat st;
+			stat(resolved, &st);
+			if (S_ISDIR(st.st_mode)) {
+				strncpy(ctx->current_dir, resolved, sizeof(ctx->current_dir) - 1);
+				send_ftp_response(client_sock, FTP_RESP_200);
+			} else {
+				send_ftp_response(client_sock, FTP_RESP_550);
+			}
+		} else {
+			send_ftp_response(client_sock, FTP_RESP_550);
+		}
 		break;
+	}
 	case FTP_CMD_TYPE:
 		send_ftp_response(client_sock, FTP_RESP_200);
 		break;
@@ -206,26 +236,24 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 		}
 		send_ftp_response(client_sock, FTP_RESP_150);
 
-		// List current directory
-		// For security, we only list the current working directory of the process
-		// In a real server, we would chroot or sandbox
-		DIR *d = opendir(".");
+		DIR *d = opendir(ctx->current_dir);
 		if (d) {
 			struct dirent *dir;
 			char line[FTP_BUFFER_SIZE];
 			while ((dir = readdir(d)) != NULL) {
-				// Simplified LIST format: -rw-r--r-- 1 owner group size date name
-				// We just send name for now to be simple, browsers might need more
-				// Let's try to fake a unix listing
-				struct stat st;
-				stat(dir->d_name, &st);
-				char date[64];
-				strftime(date, sizeof(date), "%b %d %H:%M", localtime(&st.st_mtime));
+				char full_path[PATH_MAX];
+				snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir, dir->d_name);
 				
-				snprintf(line, sizeof(line), "%s 1 ftp ftp %ld %s %s\r\n", 
-					(S_ISDIR(st.st_mode)) ? "drwxr-xr-x" : "-rw-r--r--",
-					st.st_size, date, dir->d_name);
-				write(data_sock, line, strlen(line));
+				struct stat st;
+				if (stat(full_path, &st) == 0) {
+					char date[64];
+					strftime(date, sizeof(date), "%b %d %H:%M", localtime(&st.st_mtime));
+					
+					snprintf(line, sizeof(line), "%s 1 ftp ftp %ld %s %s\r\n", 
+						(S_ISDIR(st.st_mode)) ? "drwxr-xr-x" : "-rw-r--r--",
+						st.st_size, date, dir->d_name);
+					write(data_sock, line, strlen(line));
+				}
 			}
 			closedir(d);
 		}
@@ -240,14 +268,10 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 			return;
 		}
 		
-		// Security check: prevent directory traversal
-		if (strstr(cmd->argument, "..")) {
-			close(data_sock);
-			send_ftp_response(client_sock, FTP_RESP_550);
-			return;
-		}
+		char full_path[PATH_MAX];
+		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir, cmd->argument);
 
-		FILE *f = fopen(cmd->argument, "rb");
+		FILE *f = fopen(full_path, "rb");
 		if (f) {
 			send_ftp_response(client_sock, FTP_RESP_150);
 			char buf[4096];
@@ -264,136 +288,101 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 		}
 		break;
 	}
-	case FTP_CMD_STOR:
-		send_ftp_response(client_sock, "502 Command not implemented.");
+	case FTP_CMD_STOR: {
+		int data_sock = open_data_connection(ctx);
+		if (data_sock < 0) {
+			send_ftp_response(client_sock, FTP_RESP_425);
+			return;
+		}
+		
+		// Security check
+		if (strstr(cmd->argument, "..")) {
+			close(data_sock);
+			send_ftp_response(client_sock, FTP_RESP_550);
+			return;
+		}
+
+		char full_path[PATH_MAX];
+		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir, cmd->argument);
+
+		FILE *f = fopen(full_path, "wb");
+		if (f) {
+			send_ftp_response(client_sock, FTP_RESP_150);
+			char buf[4096];
+			size_t n;
+			while ((n = read(data_sock, buf, sizeof(buf))) > 0) {
+				fwrite(buf, 1, n, f);
+			}
+			fclose(f);
+			close(data_sock);
+			send_ftp_response(client_sock, FTP_RESP_226);
+		} else {
+			close(data_sock);
+			send_ftp_response(client_sock, FTP_RESP_550);
+		}
+		break;
+	}
+	case FTP_CMD_MKD: {
+		// Security check
+		if (strstr(cmd->argument, "..")) {
+			send_ftp_response(client_sock, FTP_RESP_550);
+			break;
+		}
+		char full_path[PATH_MAX];
+		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir, cmd->argument);
+		if (mkdir(full_path, 0755) == 0) {
+			send_ftp_response(client_sock, "257 Directory created.");
+		} else {
+			send_ftp_response(client_sock, FTP_RESP_550);
+		}
+		break;
+	}
+	case FTP_CMD_RMD: {
+		// Security check
+		if (strstr(cmd->argument, "..")) {
+			send_ftp_response(client_sock, FTP_RESP_550);
+			break;
+		}
+		char full_path[PATH_MAX];
+		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir, cmd->argument);
+		if (rmdir(full_path) == 0) {
+			send_ftp_response(client_sock, FTP_RESP_250);
+		} else {
+			send_ftp_response(client_sock, FTP_RESP_550);
+		}
+		break;
+	}
+	case FTP_CMD_DELE: {
+		// Security check
+		if (strstr(cmd->argument, "..")) {
+			send_ftp_response(client_sock, FTP_RESP_550);
+			break;
+		}
+		char full_path[PATH_MAX];
+		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir, cmd->argument);
+		if (unlink(full_path) == 0) {
+			send_ftp_response(client_sock, FTP_RESP_250);
+		} else {
+			send_ftp_response(client_sock, FTP_RESP_550);
+		}
+		break;
+	}
 		break;
 	case FTP_CMD_HTTP_GET: {
 		// Serve HTTP response
-		// Check if it's a directory or file
-			// Special handling for style.css
-			if (strcmp(cmd->argument, "/style.css") == 0 || strcmp(cmd->argument, "style.css") == 0) {
-				const char *css_file = (ctx->css_path[0] != '\0') ? ctx->css_path : "style.css";
-				FILE *f = fopen(css_file, "rb");
-				if (f) {
-					fseek(f, 0, SEEK_END);
-					long fsize = ftell(f);
-					fseek(f, 0, SEEK_SET);
-					
-					char header[512];
-					snprintf(header, sizeof(header), 
-						"HTTP/1.1 200 OK\r\n"
-						"Content-Type: text/css\r\n"
-						"Content-Length: %ld\r\n"
-						"Connection: close\r\n"
-						"\r\n", fsize);
-					write(client_sock, header, strlen(header));
-					
-					char buf[4096];
-					size_t n;
-					while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-						write(client_sock, buf, n);
-					}
-					fclose(f);
-				} else {
-					const char *not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-					write(client_sock, not_found, strlen(not_found));
-				}
-				break;
-			}
-
-			struct stat st;
-			if (stat(cmd->argument, &st) == 0) {
-				if (S_ISDIR(st.st_mode)) {
-					// Directory listing
-					char body[65536]; // Increased buffer size
-					snprintf(body, sizeof(body), 
-						"<html><head>"
-						"<link rel=\"stylesheet\" href=\"/style.css\">"
-						"</head><body>"
-						"<h1>Directory Listing of %s</h1>"
-						"<table><tr><th>Name</th><th>Size</th><th>Last Modified</th></tr>", 
-						cmd->argument);
-				
-				DIR *d = opendir(cmd->argument);
-				if (d) {
-					struct dirent *dir;
-					while ((dir = readdir(d)) != NULL) {
-						char full_path[FTP_BUFFER_SIZE * 2];
-						if (strcmp(cmd->argument, ".") == 0)
-							snprintf(full_path, sizeof(full_path), "%s", dir->d_name);
-						else
-							snprintf(full_path, sizeof(full_path), "%s/%s", cmd->argument, dir->d_name);
-
-						struct stat st_file;
-						char size_str[32] = "-";
-						char date_str[64] = "-";
-						
-						if (stat(full_path, &st_file) == 0) {
-							if (!S_ISDIR(st_file.st_mode)) {
-								snprintf(size_str, sizeof(size_str), "%ld", st_file.st_size);
-							}
-							strftime(date_str, sizeof(date_str), "%Y-%m-%d %H:%M:%S", localtime(&st_file.st_mtime));
-						}
-
-						char line[1024];
-						char href[1024];
-						
-						if (strcmp(cmd->argument, "/") == 0 || strcmp(cmd->argument, ".") == 0)
-							snprintf(href, sizeof(href), "%s", dir->d_name);
-						else
-							snprintf(href, sizeof(href), "%s/%s", cmd->argument, dir->d_name);
-
-						snprintf(line, sizeof(line), 
-							"<tr><td><a href=\"%s\">%s</a></td><td>%s</td><td>%s</td></tr>", 
-							href, dir->d_name, size_str, date_str);
-							
-						if (strlen(body) + strlen(line) < sizeof(body) - 100)
-							strncat(body, line, sizeof(body) - strlen(body) - 1);
-					}
-					closedir(d);
-				}
-				strncat(body, "</table></body></html>", sizeof(body) - strlen(body) - 1);
-				
-				char response[20000];
-				snprintf(response, sizeof(response), 
-					"HTTP/1.1 200 OK\r\n"
-					"Content-Type: text/html\r\n"
-					"Content-Length: %zu\r\n"
-					"Connection: close\r\n"
-					"\r\n"
-					"%s", strlen(body), body);
-				write(client_sock, response, strlen(response));
-			} else {
-				// File download
-				FILE *f = fopen(cmd->argument, "rb");
-				if (f) {
-					fseek(f, 0, SEEK_END);
-					long fsize = ftell(f);
-					fseek(f, 0, SEEK_SET);
-					
-					char header[512];
-					snprintf(header, sizeof(header), 
-						"HTTP/1.1 200 OK\r\n"
-						"Content-Type: application/octet-stream\r\n"
-						"Content-Length: %ld\r\n"
-						"Connection: close\r\n"
-						"\r\n", fsize);
-					write(client_sock, header, strlen(header));
-					
-					char buf[4096];
-					size_t n;
-					while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-						write(client_sock, buf, n);
-					}
-					fclose(f);
-				} else {
-					const char *not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-					write(client_sock, not_found, strlen(not_found));
-				}
-			}
+		// Use the shared FTP HTTP handler
+		struct Request req = {0};
+		req.method = HTTP_GET;
+		req.path = cmd->argument;
+		
+		struct Response *res = ftp_handle_http_request_with_options(&req, ctx->current_dir, ctx->css_path);
+		if (res) {
+			send_http_response(client_sock, res);
+			free_http_response(res);
 		} else {
-			const char *not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-			write(client_sock, not_found, strlen(not_found));
+			// Fallback error
+			const char *err = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+			write(client_sock, err, strlen(err));
 		}
 		break;
 	}

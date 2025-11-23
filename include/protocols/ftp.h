@@ -21,6 +21,9 @@ typedef enum {
 	FTP_CMD_TYPE,
 	FTP_CMD_PORT,
 	FTP_CMD_PASV,
+	FTP_CMD_MKD,
+	FTP_CMD_RMD,
+	FTP_CMD_DELE,
 	FTP_CMD_HTTP_GET,
 	FTP_CMD_UNKNOWN
 } E_FtpCommand;
@@ -33,6 +36,8 @@ typedef enum {
 #define FTP_RESP_230 "230 User logged in, proceed."
 #define FTP_RESP_226 "226 Closing data connection."
 #define FTP_RESP_227 "227 Entering Passive Mode (%d,%d,%d,%d,%d,%d)."
+#define FTP_RESP_250 "250 Requested file action okay, completed."
+#define FTP_RESP_257 "257 \"%s\" created."
 
 #define FTP_RESP_331 "331 User name okay, need password."
 #define FTP_RESP_425 "425 Can't open data connection."
@@ -48,6 +53,7 @@ struct FtpContext {
 	int data_sock;
 	int data_port;
 	char current_dir[FTP_BUFFER_SIZE];
+	char root_dir[FTP_BUFFER_SIZE];
 	char css_path[FTP_BUFFER_SIZE];
 };
 

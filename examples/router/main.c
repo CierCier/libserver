@@ -67,12 +67,36 @@ static struct Response *echo_query_handler(struct Request *req) {
 	return r;
 }
 
+#include "protocols/ftp_http.h"
+
+static void ftp_middleware(struct Request *req, struct Response **res, bool *stop, void *user_data) {
+	(void)user_data;
+	if (starts_with(req->path, "/ftp")) {
+		char *original_path = req->path;
+		// Strip /ftp. If path is just /ftp, it becomes empty string, map to /
+		const char *subpath = req->path + 4;
+		if (*subpath == '\0') subpath = "/";
+		
+		req->path = str_duplicate(subpath);
+		*res = ftp_http_handler(req);
+		free(req->path);
+		req->path = original_path;
+		*stop = true;
+	}
+}
+
 int main() {
 	struct Server server;
 	server_init(&server, "127.0.0.1", SERVER_DEFAULT_PORT);
 
+	// Initialize FTP driver
+	// Root: current directory (.)
+	// CSS: examples/ftp_server/style.css
+	ftp_driver_init(".", "examples/ftp_server/style.css");
+
 	// Global middleware
 	server_use(&server, logger_mw, NULL);
+	server_use(&server, ftp_middleware, NULL);
 
 	// Create router and add routes
 	struct Router *api = router_create();

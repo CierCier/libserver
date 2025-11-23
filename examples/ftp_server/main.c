@@ -20,7 +20,10 @@ void *client_handler(void *arg) {
 	ctx.control_sock = client_sock;
 	ctx.data_listener_sock = -1;
 	ctx.data_sock = -1;
-	strcpy(ctx.current_dir, "/");
+	if (getcwd(ctx.root_dir, sizeof(ctx.root_dir)) == NULL) {
+		strcpy(ctx.root_dir, ".");
+	}
+	strcpy(ctx.current_dir, ctx.root_dir);
 	// Set path to style.css (assuming running from project root or build dir)
 	// Since we run from build/examples/, and style.css is in examples/ftp_server/
 	// We need to point to the source location or copy it.
