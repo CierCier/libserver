@@ -2,4 +2,13 @@
 .cache/
 .vscode/
 build/
+build_filc/
+build_clang
+build_gcc/
 server.log
+release/
+
+build_release/
+build_release_filc/
+build_release_clang
+build_release_gcc/
