@@ -1,26 +1,26 @@
 #include "common.h"
 #include "map.h"
+#include "stringbuilder.h"
+#include <ctype.h>
 #include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
+// This function uses malloc/realloc because it's for server setup, not
+// per-request. The allocated memory lives for the duration of the server.
 static bool compile_route_pattern(const char *path, regex_t *out_regex,
 								  char ***out_param_names,
 								  size_t *out_param_count, bool *out_is_pat) {
-	// Detect if the path has any ":param" segments
 	bool has_param = strchr(path, ':') != NULL;
 	if (out_is_pat)
 		*out_is_pat = has_param;
 	if (!has_param) {
-		// No pattern; regex not needed
 		if (out_param_names)
 			*out_param_names = NULL;
 		if (out_param_count)
@@ -28,11 +28,7 @@ static bool compile_route_pattern(const char *path, regex_t *out_regex,
 		return true;
 	}
 
-	// Build a regex from the path
-	// Replace each ":name" with "([^/]+)" and record the name
-	// Ensure full match with ^...$
 	size_t len = strlen(path);
-	// Rough upper bound for regex buffer: len * 4 + 10
 	size_t cap = len * 4 + 16;
 	char *regex_buf = malloc(cap);
 	if (!regex_buf)
@@ -49,14 +45,12 @@ static bool compile_route_pattern(const char *path, regex_t *out_regex,
 	for (size_t i = 0; i < len; i++) {
 		char c = path[i];
 		if (c == ':') {
-			// Read param name
 			size_t start = ++i;
 			while (i < len && path[i] != '/' && path[i] != 0)
 				i++;
 			size_t plen = i - start;
 			char *pname = malloc(plen + 1);
 			if (!pname) {
-				// cleanup
 				for (size_t k = 0; k < param_count; k++)
 					free(param_names[k]);
 				free(param_names);
@@ -79,14 +73,12 @@ static bool compile_route_pattern(const char *path, regex_t *out_regex,
 				param_names = tmp;
 			}
 			param_names[param_count++] = pname;
-			// Append capture group
 			const char *capgrp = "([^/]+)";
 			size_t cglen = strlen(capgrp);
 			memcpy(&regex_buf[ri], capgrp, cglen);
 			ri += cglen;
-			i--; // step back so outer loop advances to '/' or end
+			i--;
 		} else {
-			// Escape regex special chars except '/'
 			if (strchr(".^$|()[]{}+?\\", c)) {
 				regex_buf[ri++] = '\\';
 			}
@@ -142,7 +134,6 @@ struct EndPoint *endpoint_create(HttpMethod method, const char *path,
 	endpoint->is_pattern = false;
 	memset(&endpoint->regex, 0, sizeof(regex_t));
 
-	// compile pattern if contains :params
 	compile_route_pattern(path, &endpoint->regex, &endpoint->param_names,
 						  &endpoint->param_count, &endpoint->is_pattern);
 
@@ -193,19 +184,17 @@ char *str_duplicate(const char *str) {
 	return dup;
 }
 
+// ThreadPool functions
 void thread_pool_init(struct ThreadPool *pool, size_t thread_count) {
 	if (!pool || thread_count == 0)
 		return;
-
 	pool->thread_count = thread_count;
 	pool->threads = malloc(thread_count * sizeof(pthread_t));
 	pool->task_queue_head = NULL;
 	pool->task_queue_tail = NULL;
 	pool->stop = false;
-
 	pthread_mutex_init(&pool->lock, NULL);
 	pthread_cond_init(&pool->cond, NULL);
-
 	for (size_t i = 0; i < thread_count; i++) {
 		pthread_create(&pool->threads[i], NULL, thread_pool_worker, pool);
 	}
@@ -214,44 +203,38 @@ void thread_pool_init(struct ThreadPool *pool, size_t thread_count) {
 void thread_pool_destroy(struct ThreadPool *pool) {
 	if (!pool)
 		return;
-
 	pthread_mutex_lock(&pool->lock);
 	pool->stop = true;
 	pthread_cond_broadcast(&pool->cond);
 	pthread_mutex_unlock(&pool->lock);
-
 	for (size_t i = 0; i < pool->thread_count; i++) {
 		pthread_join(pool->threads[i], NULL);
 	}
-
 	free(pool->threads);
-
-	// Free remaining tasks
 	while (pool->task_queue_head) {
 		struct Task *task = pool->task_queue_head;
 		pool->task_queue_head = task->next;
+		if (task->arg_destroy) {
+			task->arg_destroy(task->arg);
+		}
 		free(task);
 	}
-
 	pthread_mutex_destroy(&pool->lock);
 	pthread_cond_destroy(&pool->cond);
 }
 
 void thread_pool_add_task(struct ThreadPool *pool, void (*function)(void *),
-						  void *arg) {
+						  void *arg, void (*arg_destroy)(void *)) {
 	if (!pool || !function)
 		return;
-
 	struct Task *task = malloc(sizeof(struct Task));
 	if (!task)
 		return;
-
 	task->function = function;
 	task->arg = arg;
+	task->arg_destroy = arg_destroy;
 	task->next = NULL;
-
 	pthread_mutex_lock(&pool->lock);
-
 	if (pool->task_queue_tail) {
 		pool->task_queue_tail->next = task;
 		pool->task_queue_tail = task;
@@ -259,56 +242,45 @@ void thread_pool_add_task(struct ThreadPool *pool, void (*function)(void *),
 		pool->task_queue_head = task;
 		pool->task_queue_tail = task;
 	}
-
 	pthread_cond_signal(&pool->cond);
 	pthread_mutex_unlock(&pool->lock);
 }
 
 void *thread_pool_worker(void *arg) {
 	struct ThreadPool *pool = (struct ThreadPool *)arg;
-
 	while (1) {
 		pthread_mutex_lock(&pool->lock);
-
 		while (!pool->task_queue_head && !pool->stop) {
 			pthread_cond_wait(&pool->cond, &pool->lock);
 		}
-
 		if (pool->stop) {
 			pthread_mutex_unlock(&pool->lock);
 			break;
 		}
-
 		struct Task *task = pool->task_queue_head;
 		pool->task_queue_head = task->next;
 		if (!pool->task_queue_head) {
 			pool->task_queue_tail = NULL;
 		}
 		pthread_mutex_unlock(&pool->lock);
-
 		task->function(task->arg);
 		free(task);
 	}
-
 	return NULL;
 }
 
 size_t get_cpu_cores() { return sysconf(_SC_NPROCESSORS_ONLN); }
 
-// Helper function to URL decode a string
-char *url_decode(const char *str) {
+static char *url_decode_arena(Arena *arena, const char *str) {
 	if (!str)
 		return NULL;
-
 	size_t len = strlen(str);
-	char *decoded = malloc(len + 1);
+	char *decoded = arena_alloc(arena, len + 1);
 	if (!decoded)
 		return NULL;
-
 	size_t i = 0, j = 0;
 	while (i < len) {
 		if (str[i] == '%' && i + 2 < len) {
-			// Decode hex value
 			int hex_val;
 			if (sscanf(&str[i + 1], "%2x", &hex_val) == 1) {
 				decoded[j++] = (char)hex_val;
@@ -317,7 +289,6 @@ char *url_decode(const char *str) {
 				decoded[j++] = str[i++];
 			}
 		} else if (str[i] == '+') {
-			// Replace + with space
 			decoded[j++] = ' ';
 			i++;
 		} else {
@@ -328,188 +299,152 @@ char *url_decode(const char *str) {
 	return decoded;
 }
 
-// Helper function to parse query parameters
-void parse_query_parameters(struct Map *query_params,
-							const char *query_string) {
+static void parse_query_parameters_arena(Arena *arena, struct Map *query_params,
+										 const char *query_string) {
 	if (!query_params || !query_string)
 		return;
 
-	char *query_copy = str_duplicate(query_string);
+	char *query_copy = arena_str_duplicate(arena, query_string);
 	if (!query_copy)
 		return;
 
-	char *param = strtok(query_copy, "&");
+	char *saveptr;
+	char *param = strtok_r(query_copy, "&", &saveptr);
 	while (param) {
 		char *equals = strchr(param, '=');
 		if (equals) {
-			*equals = '\0'; // Split key from value
-			char *key = url_decode(param);
-			char *value = url_decode(equals + 1);
-
+			*equals = '\0';
+			char *key = url_decode_arena(arena, param);
+			char *value = url_decode_arena(arena, equals + 1);
 			if (key && value) {
-				map_put(query_params, key, str_duplicate(value));
+				map_put(query_params, key, arena_str_duplicate(arena, value));
 			}
-
-			free(key);
-			free(value);
 		} else {
-			// Parameter without value (e.g., ?debug)
-			char *key = url_decode(param);
+			char *key = url_decode_arena(arena, param);
 			if (key) {
-				map_put(query_params, key, str_duplicate(""));
-				free(key);
+				map_put(query_params, key, "");
 			}
 		}
-		param = strtok(NULL, "&");
+		param = strtok_r(NULL, "&", &saveptr);
 	}
-
-	free(query_copy);
 }
 
-struct Request *parse_http_request(const char *raw_request) {
-	if (!raw_request)
+struct Request *parse_http_request(char *raw_request, Arena *arena) {
+	if (!raw_request || !arena)
 		return NULL;
 
-	struct Request *request = malloc(sizeof(struct Request));
+	struct Request *request = arena_alloc(arena, sizeof(struct Request));
 	if (!request)
 		return NULL;
 
-	// Initialize with defaults
 	request->method = HTTP_GET;
-	request->path = str_duplicate("/");
+	request->path = NULL;
 	request->body = NULL;
-	request->headers = malloc(sizeof(struct Map));
-	map_init(request->headers, 17);
-	request->query_params = malloc(sizeof(struct Map));
-	map_init(request->query_params, 17);
-	request->params = malloc(sizeof(struct Map));
-	map_init(request->params, 7);
+	request->headers = arena_alloc(arena, sizeof(struct Map));
+	if (!request->headers)
+		return NULL;
+	map_init(request->headers, arena, 17);
+	request->query_params = arena_alloc(arena, sizeof(struct Map));
+	if (!request->query_params)
+		return NULL;
+	map_init(request->query_params, arena, 17);
+	request->params = arena_alloc(arena, sizeof(struct Map));
+	if (!request->params)
+		return NULL;
+	map_init(request->params, arena, 7);
 
-	// Parse the request line (first line)
-	char *request_copy = str_duplicate(raw_request);
-	if (!request_copy) {
-		free_http_request(request);
+	// In-place parsing: we modify raw_request
+	char *request_ptr = raw_request;
+
+	char *headers_end = strstr(request_ptr, "\r\n\r\n");
+	if (!headers_end) {
 		return NULL;
 	}
 
-	char *line = strtok(request_copy, "\r\n");
+	*headers_end = '\0';
+	char *body_start = headers_end + 4;
+
+	char *saveptr;
+	char *line = strtok_r(request_ptr, "\r\n", &saveptr);
 	if (!line) {
-		free(request_copy);
-		free_http_request(request);
 		return NULL;
 	}
 
-	// Parse method, path, and version
 	char *method_str = strtok(line, " ");
 	char *path_str = strtok(NULL, " ");
 	char *version_str = strtok(NULL, " ");
 
 	if (!method_str || !path_str || !version_str) {
-		free(request_copy);
-		free_http_request(request);
 		return NULL;
 	}
 
-	// Parse HTTP method
-	if (strcmp(method_str, "GET") == 0) {
-		request->method = HTTP_GET;
-	} else if (strcmp(method_str, "POST") == 0) {
+	if (strcmp(method_str, "POST") == 0)
 		request->method = HTTP_POST;
-	} else if (strcmp(method_str, "PUT") == 0) {
+	else if (strcmp(method_str, "PUT") == 0)
 		request->method = HTTP_PUT;
-	} else if (strcmp(method_str, "DELETE") == 0) {
+	else if (strcmp(method_str, "DELETE") == 0)
 		request->method = HTTP_DELETE;
-	} else {
-		request->method = HTTP_GET; // Default to GET
+	else
+		request->method = HTTP_GET;
+
+	char *query_string = strchr(path_str, '?');
+	if (query_string) {
+		*query_string = '\0';
+		parse_query_parameters_arena(arena, request->query_params,
+									 query_string + 1);
+	}
+	// Use path_str directly as it is now null-terminated (either at ? or end of
+	// string)
+	request->path = path_str;
+
+	while ((line = strtok_r(NULL, "\r\n", &saveptr))) {
+		char *colon = strchr(line, ':');
+		if (colon) {
+			*colon = '\0';
+			char *key = line;
+			char *value = colon + 1;
+			while (isspace(*value))
+				value++;
+			// Use key and value directly
+			map_put(request->headers, key, value);
+		}
 	}
 
-	// Parse path and query parameters
-	free(request->path);
-	char *query_start = strchr(path_str, '?');
-	if (query_start) {
-		*query_start = '\0'; // Split path from query
-		query_start++;		 // Move past '?'
-
-		// Parse query parameters
-		parse_query_parameters(request->query_params, query_start);
+	char *content_length_str =
+		(char *)map_get(request->headers, "Content-Length");
+	if (content_length_str) {
+		long content_length = atol(content_length_str);
+		if (content_length > 0) {
+			request->body = body_start;
+		}
 	}
-	request->path = str_duplicate(path_str);
 
-	free(request_copy);
 	return request;
 }
 
-void free_http_request(struct Request *request) {
-	if (!request)
-		return;
-
-	free(request->path);
-	free(request->body);
-
-	// Free all query parameter values before destroying the map
-	if (request->query_params) {
-		for (size_t i = 0; i < request->query_params->bucket_count; i++) {
-			struct MapEntry *entry = request->query_params->buckets[i];
-			while (entry) {
-				free(entry->value); // Free the duplicated value string
-				entry = entry->next;
-			}
-		}
-		map_destroy(request->query_params);
-		free(request->query_params);
-	}
-
-	// Clean up params map
-	if (request->params) {
-		for (size_t i = 0; i < request->params->bucket_count; i++) {
-			struct MapEntry *entry = request->params->buckets[i];
-			while (entry) {
-				free(entry->value);
-				entry = entry->next;
-			}
-		}
-		map_destroy(request->params);
-		free(request->params);
-	}
-
-	// Clean up headers map
-	if (request->headers) {
-		map_destroy(request->headers);
-		free(request->headers);
-	}
-
-	free(request);
-}
-
-struct Response *create_http_response(int status_code, const char *body) {
-	struct Response *response = malloc(sizeof(struct Response));
+struct Response *create_http_response(int status_code, const char *body,
+									  Arena *arena) {
+	struct Response *response = arena_alloc(arena, sizeof(struct Response));
 	if (!response)
 		return NULL;
 
 	response->status_code = status_code;
-	response->body = str_duplicate(body ? body : "");
-	response->headers = malloc(sizeof(struct Map));
-	map_init(response->headers, 17);
+	response->body = arena_str_duplicate(arena, body ? body : "");
+	response->headers = arena_alloc(arena, sizeof(struct Map));
+	if (!response->headers)
+		return NULL;
+	map_init(response->headers, arena, 17);
 	return response;
-}
-
-void free_http_response(struct Response *response) {
-	if (!response)
-		return;
-	free(response->body);
-	map_destroy(response->headers);
-	free(response);
 }
 
 void send_http_response(int client_sock, struct Response *response) {
 	if (!response || client_sock < 0)
 		return;
 
+	StringBuilder *sb = sb_create(NULL, 1024);
+
 	const char *reason = "OK";
 	switch (response->status_code) {
-	case 200:
-		reason = "OK";
-		break;
 	case 201:
 		reason = "Created";
 		break;
@@ -534,55 +469,46 @@ void send_http_response(int client_sock, struct Response *response) {
 	case 500:
 		reason = "Internal Server Error";
 		break;
-	default:
-		reason = "OK";
-		break;
 	}
 
 	char status_line[256];
-	snprintf(status_line, sizeof(status_line), "HTTP/1.1 %d %s\r\n",
-			 response->status_code, reason);
-	write(client_sock, status_line, strlen(status_line));
+	sprintf(status_line, "HTTP/1.1 %d %s\r\n", response->status_code, reason);
+	sb_append(sb, status_line);
 
-	// Content-Length header
 	char content_length[256];
-	snprintf(content_length, sizeof(content_length), "Content-Length: %zu\r\n",
-			 strlen(response->body ? response->body : ""));
-	write(client_sock, content_length, strlen(content_length));
+	sprintf(content_length, "Content-Length: %zu\r\n",
+			strlen(response->body ? response->body : ""));
+	sb_append(sb, content_length);
 
-	// Write custom headers from response->headers; track if Content-Type set
 	bool has_content_type = false;
-	for (size_t i = 0; i < response->headers->bucket_count; i++) {
-		struct MapEntry *entry = response->headers->buckets[i];
-		while (entry) {
-			const char *k = entry->key;
-			const char *v = (const char *)entry->value;
-			if (k && v) {
-				if (strcasecmp(k, "Content-Type") == 0) {
-					has_content_type = true;
+	if (response->headers) {
+		for (size_t i = 0; i < response->headers->bucket_count; i++) {
+			struct MapEntry *entry = response->headers->buckets[i];
+			while (entry) {
+				const char *k = entry->key;
+				const char *v = (const char *)entry->value;
+				if (k && v) {
+					if (strcasecmp(k, "Content-Type") == 0) {
+						has_content_type = true;
+					}
+					char header_line[1024];
+					sprintf(header_line, "%s: %s\r\n", k, v);
+					sb_append(sb, header_line);
 				}
-				char header_line[1024];
-				snprintf(header_line, sizeof(header_line), "%s: %s\r\n", k, v);
-				write(client_sock, header_line, strlen(header_line));
+				entry = entry->next;
 			}
-			entry = entry->next;
 		}
 	}
 	if (!has_content_type) {
-		const char *content_type =
-			"Content-Type: text/plain; charset=utf-8\r\n";
-		write(client_sock, content_type, strlen(content_type));
+		sb_append(sb, "Content-Type: text/plain; charset=utf-8\r\n");
 	}
 
-	// Indicate we will close the connection
-	const char *conn_close = "Connection: close\r\n";
-	write(client_sock, conn_close, strlen(conn_close));
+	sb_append(sb, "Connection: close\r\n\r\n");
 
-	// End headers
-	write(client_sock, "\r\n", 2);
-
-	// Body
 	if (response->body) {
-		write(client_sock, response->body, strlen(response->body));
+		sb_append(sb, response->body);
 	}
+
+	write(client_sock, sb->buffer, sb->length);
+	sb_destroy(sb);
 }

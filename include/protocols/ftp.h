@@ -2,6 +2,7 @@
 
 // Basic FTP protocol definitions and utilities
 
+#include "arena.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -67,5 +68,6 @@ struct S_FtpCommand *parse_ftp_command(const char *cmd_str);
 const char *ftp_command_to_string(E_FtpCommand cmd);
 
 void free_ftp_command(struct S_FtpCommand *cmd);
-void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd);
+void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd,
+						Arena *arena);
 void send_ftp_response(int client_sock, const char *response);

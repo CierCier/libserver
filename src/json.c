@@ -1,4 +1,5 @@
 #include "json.h"
+#include "arena.h"
 #include "map.h"
 #include "stringbuilder.h"
 #include <ctype.h>
@@ -6,159 +7,111 @@
 #include <stdlib.h>
 #include <string.h>
 
-// just some helpers
+// Forward declarations
 static void skip_ws(const char **p);
-static struct JsonValue *parse_value(const char **p);
-static struct JsonValue *parse_object(const char **p);
-static struct JsonValue *parse_array(const char **p);
-static struct JsonValue *parse_string(const char **p);
-static struct JsonValue *parse_number(const char **p);
-static int match(const char **p, const char *kw);
-static int expect_char(const char **p, char c);
+static struct JsonValue *parse_value(struct Arena *arena, char **p);
+static struct JsonValue *parse_object(struct Arena *arena, char **p);
+static struct JsonValue *parse_array(struct Arena *arena, char **p);
+static struct JsonValue *parse_string(struct Arena *arena, char **p);
+static struct JsonValue *parse_number(struct Arena *arena, char **p);
+static int match(char **p, const char *kw);
+static int expect_char(char **p, char c);
 static char hex_to_char(const char *h4, int *ok);
-static void append_escaped_string(struct StringBuilder *sb, const char *s);
+static void append_escaped_string(StringBuilder *sb, const char *s);
+static struct JsonValue *make_value(struct Arena *arena, enum JSONValueType t);
 
-static struct JsonValue g_null_instance = {.type = JSON_NULL};
+static struct JsonValue g_null_instance = {.type = JSON_NULL, .arena = NULL};
 
-struct JsonValue *json_parse(const char *json_str) {
+struct JsonValue *json_parse(struct Arena *arena, char *json_str) {
 	if (!json_str)
 		return NULL;
-	const char *p = json_str;
-	skip_ws(&p);
-	struct JsonValue *v = parse_value(&p);
+	char *p = json_str;
+	skip_ws((const char **)&p);
+	struct JsonValue *v = parse_value(arena, &p);
 	if (!v)
 		return NULL;
-	skip_ws(&p);
-	// If trailing characters exist and are non-whitespace, treat as error
+	skip_ws((const char **)&p);
 	if (*p != '\0') {
-		json_free(v);
-		return NULL;
+		return NULL; // Trailing characters
 	}
 	return v;
 }
 
-char *json_serialize(const struct JsonValue *value) {
-	struct StringBuilder *sb = sb_create(4);
+char *json_serialize(struct Arena *arena, const struct JsonValue *value) {
+	StringBuilder *sb = sb_create(arena, 256);
 	if (!sb)
 		return NULL;
 
 	if (!value) {
 		sb_append(sb, "null");
-		char *result = sb_consume(sb);
-		sb_destroy(sb);
-		return result;
+		return sb_to_string(sb);
 	}
+
 	switch (value->type) {
 	case JSON_NULL:
 		sb_append(sb, "null");
 		break;
 	case JSON_BOOL:
-		if (value->bool_value)
-			sb_append(sb, "true");
-		else
-			sb_append(sb, "false");
+		sb_append(sb, value->bool_value ? "true" : "false");
 		break;
 	case JSON_NUMBER: {
-		char buffer[32];
-		snprintf(buffer, sizeof(buffer), "%lf", value->number_value);
+		char buffer[64];
+		snprintf(buffer, sizeof(buffer), "%g", value->number_value);
 		sb_append(sb, buffer);
 		break;
 	}
 	case JSON_STRING:
-		sb_append(sb, "\"");
-		for (const char *p = value->string_value; *p; p++) {
-			switch (*p) {
-			case '\"':
-				sb_append(sb, "\\\"");
-				break;
-			case '\\':
-				sb_append(sb, "\\\\");
-				break;
-			case '\b':
-				sb_append(sb, "\\b");
-				break;
-			case '\f':
-				sb_append(sb, "\\f");
-				break;
-			case '\n':
-				sb_append(sb, "\\n");
-				break;
-			case '\r':
-				sb_append(sb, "\\r");
-				break;
-			case '\t':
-				sb_append(sb, "\\t");
-				break;
-			default:
-				if ((unsigned char)*p < 0x20) {
-					char buffer[7];
-					snprintf(buffer, sizeof(buffer), "\\u%04x",
-							 (unsigned char)*p);
-					sb_append(sb, buffer);
-				} else {
-					sb_append_char(sb, *p);
-				}
-				break;
-			}
-		}
-		sb_append(sb, "\"");
+		sb_append_char(sb, '"');
+		append_escaped_string(sb, value->string_value);
+		sb_append_char(sb, '"');
 		break;
 	case JSON_ARRAY:
-		sb_append(sb, "[");
+		sb_append_char(sb, '[');
 		for (size_t i = 0; i < value->array_value.count; i++) {
 			if (i > 0)
-				sb_append(sb, ",");
-			char *elem_str = json_serialize(value->array_value.items[i]);
-			if (!elem_str) {
-				sb_destroy(sb);
-				return NULL;
+				sb_append_char(sb, ',');
+			char *elem_str = json_serialize(arena, value->array_value.items[i]);
+			if (elem_str) {
+				sb_append(sb, elem_str);
 			}
-			sb_append(sb, elem_str);
-			free(elem_str);
 		}
-		sb_append(sb, "]");
+		sb_append_char(sb, ']');
 		break;
 	case JSON_OBJECT: {
-		sb_append(sb, "{");
+		sb_append_char(sb, '{');
 		if (value->object_value) {
 			size_t emitted = 0;
-			struct Map *map = value->object_value;
-			for (size_t i = 0; i < map->bucket_count; i++) {
-				struct MapEntry *entry = map->buckets[i];
+			for (size_t i = 0; i < value->object_value->bucket_count; i++) {
+				struct MapEntry *entry = value->object_value->buckets[i];
 				while (entry) {
 					if (emitted++ > 0)
-						sb_append(sb, ",");
-
-					sb_append(sb, "\"");
+						sb_append_char(sb, ',');
+					sb_append_char(sb, '"');
 					append_escaped_string(sb, entry->key);
-					sb_append(sb, "\":");
-
-					char *val_str =
-						json_serialize((const struct JsonValue *)entry->value);
-					if (!val_str) {
-						// On failure, insert null
-						sb_append(sb, "null");
-					} else {
+					sb_append(sb, ":");
+					char *val_str = json_serialize(
+						arena, (const struct JsonValue *)entry->value);
+					if (val_str) {
 						sb_append(sb, val_str);
-						free(val_str);
+					} else {
+						sb_append(sb, "null");
 					}
 					entry = entry->next;
 				}
 			}
 		}
-		sb_append(sb, "}");
+		sb_append_char(sb, '}');
 		break;
 	}
 	}
-
-	char *result = sb_consume(sb);
-	sb_destroy(sb);
-	return result;
+	return sb_to_string(sb);
 }
 
 void json_free(struct JsonValue *value) {
-	if (!value || value == &g_null_instance)
+	if (!value || value->arena != NULL || value == &g_null_instance) {
 		return;
+	}
+
 	switch (value->type) {
 	case JSON_STRING:
 		free(value->string_value);
@@ -173,9 +126,10 @@ void json_free(struct JsonValue *value) {
 		break;
 	case JSON_OBJECT:
 		if (value->object_value) {
-			struct Map *map = value->object_value;
-			for (size_t i = 0; i < map->bucket_count; i++) {
-				struct MapEntry *entry = map->buckets[i];
+			// This assumes map keys are arena allocated or literals, but values
+			// are json_values
+			for (size_t i = 0; i < value->object_value->bucket_count; i++) {
+				struct MapEntry *entry = value->object_value->buckets[i];
 				while (entry) {
 					json_free((struct JsonValue *)entry->value);
 					entry = entry->next;
@@ -185,9 +139,6 @@ void json_free(struct JsonValue *value) {
 			free(value->object_value);
 		}
 		break;
-	case JSON_NULL:
-	case JSON_BOOL:
-	case JSON_NUMBER:
 	default:
 		break;
 	}
@@ -196,18 +147,27 @@ void json_free(struct JsonValue *value) {
 
 struct JsonValue *json_get_object_value(const struct JsonValue *object,
 										const char *key) {
-	if (!object || object->type != JSON_OBJECT || !key || !object->object_value)
+	if (!object || object->type != JSON_OBJECT || !key)
 		return NULL;
 	return (struct JsonValue *)map_get(object->object_value, key);
 }
-
-struct JsonValue *json_get_array_element(const struct JsonValue *array,
-										 size_t index) {
-	if (!array || array->type != JSON_ARRAY)
-		return NULL;
-	if (index >= array->array_value.count)
-		return NULL;
-	return array->array_value.items[index];
+bool json_is_null(const struct JsonValue *v) {
+	return v && v->type == JSON_NULL;
+}
+bool json_is_bool(const struct JsonValue *v) {
+	return v && v->type == JSON_BOOL;
+}
+bool json_is_number(const struct JsonValue *v) {
+	return v && v->type == JSON_NUMBER;
+}
+bool json_is_string(const struct JsonValue *v) {
+	return v && v->type == JSON_STRING;
+}
+bool json_is_array(const struct JsonValue *v) {
+	return v && v->type == JSON_ARRAY;
+}
+bool json_is_object(const struct JsonValue *v) {
+	return v && v->type == JSON_OBJECT;
 }
 
 size_t json_get_array_size(const struct JsonValue *array) {
@@ -216,60 +176,89 @@ size_t json_get_array_size(const struct JsonValue *array) {
 	return array->array_value.count;
 }
 
-int json_get_bool(const struct JsonValue *value) {
-	if (!value || value->type != JSON_BOOL)
-		return 0;
-	return value->bool_value ? 1 : 0;
-}
-
-double json_get_number(const struct JsonValue *value) {
-	if (!value || value->type != JSON_NUMBER)
-		return 0.0;
-	return value->number_value;
-}
-
-const char *json_get_string(const struct JsonValue *value) {
-	if (!value || value->type != JSON_STRING)
+struct JsonValue *json_get_array_element(const struct JsonValue *array,
+										 size_t index) {
+	if (!array || array->type != JSON_ARRAY ||
+		index >= array->array_value.count)
 		return NULL;
-	return value->string_value;
+	return array->array_value.items[index];
 }
 
-int json_is_null(const struct JsonValue *value) {
-	return value && value->type == JSON_NULL;
-}
-int json_is_bool(const struct JsonValue *value) {
-	return value && value->type == JSON_BOOL;
-}
-int json_is_number(const struct JsonValue *value) {
-	return value && value->type == JSON_NUMBER;
-}
-int json_is_string(const struct JsonValue *value) {
-	return value && value->type == JSON_STRING;
-}
-int json_is_array(const struct JsonValue *value) {
-	return value && value->type == JSON_ARRAY;
-}
-int json_is_object(const struct JsonValue *value) {
-	return value && value->type == JSON_OBJECT;
+struct JsonValue *json_create_object(struct Arena *arena) {
+	struct JsonValue *v = make_value(arena, JSON_OBJECT);
+	if (!v)
+		return NULL;
+	v->object_value = arena_alloc(arena, sizeof(struct Map));
+	if (v->object_value)
+		map_init(v->object_value, arena, 17);
+	return v;
 }
 
-// ---------------- Parsing helpers ----------------
+struct JsonValue *json_create_string(struct Arena *arena, const char *str) {
+	struct JsonValue *v = make_value(arena, JSON_STRING);
+	if (!v)
+		return NULL;
+	v->string_value = arena_str_duplicate(arena, str);
+	return v;
+}
+
+struct JsonValue *json_create_null(struct Arena *arena) {
+	(void)arena; // Null values use a static instance
+	return &g_null_instance;
+}
+
+struct JsonValue *json_create_bool(struct Arena *arena, int bool_value) {
+	struct JsonValue *v = make_value(arena, JSON_BOOL);
+	if (!v)
+		return NULL;
+	v->bool_value = bool_value ? true : false;
+	return v;
+}
+
+struct JsonValue *json_create_number(struct Arena *arena, double number_value) {
+	struct JsonValue *v = make_value(arena, JSON_NUMBER);
+	if (!v)
+		return NULL;
+	v->number_value = number_value;
+	return v;
+}
+
+struct JsonValue *json_create_array(struct Arena *arena) {
+	struct JsonValue *v = make_value(arena, JSON_ARRAY);
+	if (!v)
+		return NULL;
+	v->array_value.items = NULL;
+	v->array_value.count = 0;
+	v->array_value.capacity = 0;
+	return v;
+}
+
+// Implementations
+
 static void skip_ws(const char **p) {
-	while (**p && isspace((unsigned char)**p))
+	while (**p && isspace(**p))
 		(*p)++;
 }
 
-static int match(const char **p, const char *kw) {
-	size_t n = strlen(kw);
-	if (strncmp(*p, kw, n) == 0) {
-		*p += n;
+static struct JsonValue *make_value(struct Arena *arena, enum JSONValueType t) {
+	struct JsonValue *v = arena_alloc(arena, sizeof(struct JsonValue));
+	if (!v)
+		return NULL;
+	v->type = t;
+	v->arena = arena;
+	return v;
+}
+
+static int match(char **p, const char *kw) {
+	size_t len = strlen(kw);
+	if (strncmp(*p, kw, len) == 0) {
+		*p += len;
 		return 1;
 	}
 	return 0;
 }
 
-static int expect_char(const char **p, char c) {
-	skip_ws(p);
+static int expect_char(char **p, char c) {
 	if (**p == c) {
 		(*p)++;
 		return 1;
@@ -277,288 +266,263 @@ static int expect_char(const char **p, char c) {
 	return 0;
 }
 
-static struct JsonValue *make_value(enum JSONValueType t) {
-	struct JsonValue *v = (struct JsonValue *)malloc(sizeof(struct JsonValue));
-	if (!v)
-		return NULL;
-	memset(v, 0, sizeof(*v));
-	v->type = t;
-	return v;
-}
-
-static struct JsonValue *parse_value(const char **p) {
-	skip_ws(p);
+static struct JsonValue *parse_value(struct Arena *arena, char **p) {
+	skip_ws((const char **)p);
 	char c = **p;
-	if (c == '"')
-		return parse_string(p);
+	if (!c)
+		return NULL;
 	if (c == '{')
-		return parse_object(p);
+		return parse_object(arena, p);
 	if (c == '[')
-		return parse_array(p);
-	if (c == '-' || (c >= '0' && c <= '9'))
-		return parse_number(p);
+		return parse_array(arena, p);
+	if (c == '"')
+		return parse_string(arena, p);
+	if (c == '-' || isdigit(c))
+		return parse_number(arena, p);
 	if (match(p, "true")) {
-		struct JsonValue *v = make_value(JSON_BOOL);
+		struct JsonValue *v = make_value(arena, JSON_BOOL);
 		if (v)
-			v->bool_value = 1;
+			v->bool_value = true;
 		return v;
 	}
 	if (match(p, "false")) {
-		struct JsonValue *v = make_value(JSON_BOOL);
+		struct JsonValue *v = make_value(arena, JSON_BOOL);
 		if (v)
-			v->bool_value = 0;
+			v->bool_value = false;
 		return v;
 	}
-	if (match(p, "null")) {
-		return json_create_null();
+	if (match(p, "null"))
+		return &g_null_instance;
+	return NULL;
+}
+
+static struct JsonValue *parse_object(struct Arena *arena, char **p) {
+	if (!expect_char(p, '{'))
+		return NULL;
+	struct JsonValue *v = make_value(arena, JSON_OBJECT);
+	if (!v)
+		return NULL;
+	v->object_value = arena_alloc(arena, sizeof(struct Map));
+	if (!v->object_value)
+		return NULL;
+	map_init(v->object_value, arena, 17);
+
+	skip_ws((const char **)p);
+	if (**p == '}') {
+		(*p)++;
+		return v;
+	}
+
+	while (1) {
+		skip_ws((const char **)p);
+		struct JsonValue *key = parse_string(arena, p);
+		if (!key)
+			return NULL;
+
+		skip_ws((const char **)p);
+		if (!expect_char(p, ':'))
+			return NULL;
+
+		struct JsonValue *val = parse_value(arena, p);
+		if (!val)
+			return NULL;
+
+		map_put(v->object_value, key->string_value, val);
+
+		skip_ws((const char **)p);
+		if (**p == ',') {
+			(*p)++;
+		} else if (**p == '}') {
+			(*p)++;
+			break;
+		} else {
+			return NULL;
+		}
+	}
+	return v;
+}
+
+static struct JsonValue *parse_array(struct Arena *arena, char **p) {
+	if (!expect_char(p, '['))
+		return NULL;
+	struct JsonValue *v = make_value(arena, JSON_ARRAY);
+	if (!v)
+		return NULL;
+
+	// Temporary storage for items
+	size_t cap = 8;
+	size_t count = 0;
+	struct JsonValue **items =
+		arena_alloc(arena, cap * sizeof(struct JsonValue *));
+	if (!items)
+		return NULL;
+
+	skip_ws((const char **)p);
+	if (**p == ']') {
+		(*p)++;
+		v->array_value.count = 0;
+		v->array_value.items = NULL;
+		return v;
+	}
+
+	while (1) {
+		struct JsonValue *elem = parse_value(arena, p);
+		if (!elem)
+			return NULL;
+
+		if (count == cap) {
+			// Simple arena realloc/grow
+			size_t new_cap = cap * 2;
+			struct JsonValue **new_items =
+				arena_alloc(arena, new_cap * sizeof(struct JsonValue *));
+			if (!new_items)
+				return NULL;
+			memcpy(new_items, items, count * sizeof(struct JsonValue *));
+			items = new_items;
+			cap = new_cap;
+		}
+		items[count++] = elem;
+
+		skip_ws((const char **)p);
+		if (**p == ',') {
+			(*p)++;
+		} else if (**p == ']') {
+			(*p)++;
+			break;
+		} else {
+			return NULL;
+		}
+	}
+	v->array_value.count = count;
+	v->array_value.items = items;
+	return v;
+}
+
+static struct JsonValue *parse_string(struct Arena *arena, char **p) {
+	if (!expect_char(p, '"'))
+		return NULL;
+	char *start = *p;
+	char *out = start;
+
+	while (**p) {
+		char c = **p;
+		if (c == '"') {
+			(*p)++;
+			*out = '\0';
+			struct JsonValue *v = make_value(arena, JSON_STRING);
+			if (!v)
+				return NULL;
+			v->string_value = start;
+			return v;
+		}
+		if (c == '\\') {
+			(*p)++;
+			if (!**p)
+				return NULL;
+			char esc = **p;
+			(*p)++;
+			switch (esc) {
+			case '"':
+				*out++ = '"';
+				break;
+			case '\\':
+				*out++ = '\\';
+				break;
+			case '/':
+				*out++ = '/';
+				break;
+			case 'b':
+				*out++ = '\b';
+				break;
+			case 'f':
+				*out++ = '\f';
+				break;
+			case 'n':
+				*out++ = '\n';
+				break;
+			case 'r':
+				*out++ = '\r';
+				break;
+			case 't':
+				*out++ = '\t';
+				break;
+			case 'u': {
+				char h4[5];
+				if (strlen(*p) < 4)
+					return NULL; // Should check bounds safely
+				memcpy(h4, *p, 4);
+				h4[4] = 0;
+				int ok;
+				char ch = hex_to_char(h4, &ok);
+				if (!ok)
+					return NULL;
+				*out++ = ch;
+				*p += 4;
+				break;
+			}
+			default:
+				return NULL;
+			}
+		} else {
+			*out++ = **p;
+			(*p)++;
+		}
 	}
 	return NULL;
 }
 
-static char hex_to_char(const char *h4, int *ok) {
-	int v = 0;
-	*ok = 1;
-	for (int i = 0; i < 4; i++) {
-		char ch = h4[i];
-		int d;
-		if (ch >= '0' && ch <= '9')
-			d = ch - '0';
-		else if (ch >= 'a' && ch <= 'f')
-			d = ch - 'a' + 10;
-		else if (ch >= 'A' && ch <= 'F')
-			d = ch - 'A' + 10;
-		else {
-			*ok = 0;
-			return '\0';
-		}
-		v = (v << 4) | d;
-	}
-	if (v <= 0xFF)
-		return (char)v;
-	// not full UTF-16 handling , i dont want to ever deal with that
-	return '?';
-}
-
-static struct JsonValue *parse_string(const char **p) {
-	if (!expect_char(p, '"'))
-		return NULL;
-	const char *s = *p;
-	struct StringBuilder *sb = sb_create(32);
-	if (!sb)
-		return NULL;
-	while (**p) {
-		char ch = **p;
-		if (ch == '"') {
-			(*p)++;
-			break;
-		}
-		if (ch == '\\') {
-			(*p)++;
-			char esc = **p;
-			if (!esc) {
-				sb_destroy(sb);
-				return NULL;
-			}
-			switch (esc) {
-			case '"':
-				sb_append_char(sb, '"');
-				(*p)++;
-				break;
-			case '\\':
-				sb_append_char(sb, '\\');
-				(*p)++;
-				break;
-			case '/':
-				sb_append_char(sb, '/');
-				(*p)++;
-				break;
-			case 'b':
-				sb_append_char(sb, '\b');
-				(*p)++;
-				break;
-			case 'f':
-				sb_append_char(sb, '\f');
-				(*p)++;
-				break;
-			case 'n':
-				sb_append_char(sb, '\n');
-				(*p)++;
-				break;
-			case 'r':
-				sb_append_char(sb, '\r');
-				(*p)++;
-				break;
-			case 't':
-				sb_append_char(sb, '\t');
-				(*p)++;
-				break;
-			case 'u': {
-				if ((*p)[1] && (*p)[2] && (*p)[3] && (*p)[4]) {
-					int ok = 0;
-					char c8 = hex_to_char((*p) + 1, &ok);
-					if (!ok) {
-						sb_destroy(sb);
-						return NULL;
-					}
-					sb_append_char(sb, c8);
-					(*p) += 5;
-				} else {
-					sb_destroy(sb);
-					return NULL;
-				}
-				break;
-			}
-			default:
-				sb_destroy(sb);
-				return NULL;
-			}
-		} else {
-			sb_append_char(sb, ch);
-			(*p)++;
-		}
-	}
-	char *out = sb_consume(sb);
-	sb_destroy(sb);
-	if (!out)
-		return NULL;
-	struct JsonValue *v = make_value(JSON_STRING);
-	if (!v) {
-		free(out);
-		return NULL;
-	}
-	v->string_value = out;
-	return v;
-}
-
-static struct JsonValue *parse_number(const char **p) {
-	const char *start = *p;
+static struct JsonValue *parse_number(struct Arena *arena, char **p) {
+	char *start = *p;
+	// Validate number format roughly
 	if (**p == '-')
 		(*p)++;
-	if (**p == '0') {
-		(*p)++;
-	} else if (isdigit((unsigned char)**p)) {
-		while (isdigit((unsigned char)**p))
-			(*p)++;
-	} else
+	if (!isdigit(**p))
 		return NULL;
+	while (isdigit(**p))
+		(*p)++;
 	if (**p == '.') {
 		(*p)++;
-		if (!isdigit((unsigned char)**p))
-			return NULL;
-		while (isdigit((unsigned char)**p))
+		while (isdigit(**p))
 			(*p)++;
 	}
 	if (**p == 'e' || **p == 'E') {
 		(*p)++;
 		if (**p == '+' || **p == '-')
 			(*p)++;
-		if (!isdigit((unsigned char)**p))
-			return NULL;
-		while (isdigit((unsigned char)**p))
+		while (isdigit(**p))
 			(*p)++;
 	}
-	double val = strtod(start, NULL);
-	struct JsonValue *v = make_value(JSON_NUMBER);
+
+	char *end;
+	double d = strtod(start, &end);
+	if (end != *p) {
+		*p = end;
+	}
+
+	struct JsonValue *v = make_value(arena, JSON_NUMBER);
 	if (!v)
 		return NULL;
-	v->number_value = val;
+	v->number_value = d;
 	return v;
 }
 
-static struct JsonValue *parse_array(const char **p) {
-	if (!expect_char(p, '['))
-		return NULL;
-	skip_ws(p);
-	struct JsonValue *v = make_value(JSON_ARRAY);
-	if (!v)
-		return NULL;
-	v->array_value.items = NULL;
-	v->array_value.count = 0;
-	if (expect_char(p, ']'))
-		return v; // empty array
-	while (1) {
-		struct JsonValue *elem = parse_value(p);
-		if (!elem) {
-			json_free(v);
-			return NULL;
-		}
-		struct JsonValue **new_items =
-			realloc(v->array_value.items,
-					(v->array_value.count + 1) * sizeof(*new_items));
-		if (!new_items) {
-			json_free(elem);
-			json_free(v);
-			return NULL;
-		}
-		v->array_value.items = new_items;
-		v->array_value.items[v->array_value.count++] = elem;
-		skip_ws(p);
-		if (expect_char(p, ']'))
-			break;
-		if (!expect_char(p, ',')) {
-			json_free(v);
-			return NULL;
-		}
-		skip_ws(p);
+static char hex_to_char(const char *h4, int *ok) {
+	char *end;
+	long v = strtol(h4, &end, 16);
+	if (end != h4 + 4) {
+		*ok = 0;
+		return 0;
 	}
-	return v;
+	*ok = 1;
+	return (char)v;
 }
 
-static struct JsonValue *parse_object(const char **p) {
-	if (!expect_char(p, '{'))
-		return NULL;
-	skip_ws(p);
-	struct JsonValue *v = make_value(JSON_OBJECT);
-	if (!v)
-		return NULL;
-	v->object_value = (struct Map *)malloc(sizeof(struct Map));
-	if (!v->object_value) {
-		free(v);
-		return NULL;
-	}
-	map_init(v->object_value, 17);
-	if (expect_char(p, '}'))
-		return v; // empty object
-	while (1) {
-
-		struct JsonValue *k = parse_string(p);
-		if (!k || k->type != JSON_STRING) {
-			if (k)
-				json_free(k);
-			json_free(v);
-			return NULL;
-		}
-		skip_ws(p);
-		if (!expect_char(p, ':')) {
-			json_free(k);
-			json_free(v);
-			return NULL;
-		}
-		skip_ws(p);
-		struct JsonValue *val = parse_value(p);
-		if (!val) {
-			json_free(k);
-			json_free(v);
-			return NULL;
-		}
-		// put into map (duplicate key string for map)
-		map_put(v->object_value, k->string_value, val);
-		json_free(k);
-		skip_ws(p);
-		if (expect_char(p, '}'))
-			break;
-		if (!expect_char(p, ',')) {
-			json_free(v);
-			return NULL;
-		}
-		skip_ws(p);
-	}
-	return v;
-}
-
-static void append_escaped_string(struct StringBuilder *sb, const char *s) {
-	for (const char *p = s; *p; p++) {
-		switch (*p) {
+static void append_escaped_string(StringBuilder *sb, const char *s) {
+	if (!s)
+		return;
+	while (*s) {
+		char c = *s++;
+		switch (c) {
 		case '"':
 			sb_append(sb, "\\\"");
 			break;
@@ -581,70 +545,13 @@ static void append_escaped_string(struct StringBuilder *sb, const char *s) {
 			sb_append(sb, "\\t");
 			break;
 		default:
-			if ((unsigned char)*p < 0x20) {
-				char buffer[7];
-				snprintf(buffer, sizeof(buffer), "\\u%04x", (unsigned char)*p);
-				sb_append(sb, buffer);
+			if (iscntrl(c)) {
+				char buf[7];
+				sprintf(buf, "\\u%04x", (unsigned char)c);
+				sb_append(sb, buf);
 			} else {
-				sb_append_char(sb, *p);
+				sb_append_char(sb, c);
 			}
 		}
 	}
-}
-
-
-
-struct JsonValue *json_create_null() {
-	return &g_null_instance;
-}
-
-struct JsonValue *json_create_bool(int bool_value) {
-	struct JsonValue *v = make_value(JSON_BOOL);
-	if (v)
-		v->bool_value = bool_value ? 1 : 0;
-	return v;
-}
-
-struct JsonValue *json_create_number(double number_value) {
-	struct JsonValue *v = make_value(JSON_NUMBER);
-	if (v)
-		v->number_value = number_value;
-	return v;
-}
-
-struct JsonValue *json_create_string(const char *string_value) {
-	if (!string_value)
-		return NULL;
-	struct JsonValue *v = make_value(JSON_STRING);
-	if (!v)
-		return NULL;
-	v->string_value = malloc(strlen(string_value) + 1);
-	if (!v->string_value) {
-		free(v);
-		return NULL;
-	}
-	strcpy(v->string_value, string_value);
-	return v;
-}
-
-struct JsonValue *json_create_array() {
-	struct JsonValue *v = make_value(JSON_ARRAY);
-	if (v) {
-		v->array_value.items = NULL;
-		v->array_value.count = 0;
-	}
-	return v;
-}
-
-struct JsonValue *json_create_object() {
-	struct JsonValue *v = make_value(JSON_OBJECT);
-	if (v) {
-		v->object_value = (struct Map *)malloc(sizeof(struct Map));
-		if (!v->object_value) {
-			free(v);
-			return NULL;
-		}
-		map_init(v->object_value, 17);
-	}
-	return v;
 }

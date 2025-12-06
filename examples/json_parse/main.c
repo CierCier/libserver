@@ -7,7 +7,7 @@
 #include <map.h>
 
 static void print_value(const struct JsonValue *v, const char *label) {
-	char *s = json_serialize(v);
+	char *s = json_serialize(NULL, v);
 	if (s) {
 		printf("%s: %s\n", label, s);
 		free(s);
@@ -37,8 +37,8 @@ int main(int argc, char **argv) {
 	fclose(f);
 
 	printf("Parsing %s (size: %ld bytes)\n", filename, sz);
-	struct JsonValue *root = json_parse(buf);
-	free(buf);
+	struct JsonValue *root = json_parse(NULL, buf);
+
 	if (!root) {
 		printf("Parse failed!\n");
 		return 1;
@@ -62,5 +62,6 @@ int main(int argc, char **argv) {
 	}
 
 	json_free(root);
+	free(buf);
 	return 0;
 }

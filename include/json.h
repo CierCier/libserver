@@ -1,7 +1,9 @@
 #pragma once
 
-#include <map.h>
+#include "map.h"
 #include <stddef.h>
+
+struct Arena;
 
 enum JSONValueType {
 	JSON_NULL,
@@ -21,13 +23,15 @@ struct JsonValue {
 		struct {
 			struct JsonValue **items;
 			size_t count;
+			size_t capacity; // For arena allocation
 		} array_value;
 		struct Map *object_value;
 	};
+	struct Arena *arena;
 };
 
-struct JsonValue *json_parse(const char *json_str);
-char *json_serialize(const struct JsonValue *value);
+struct JsonValue *json_parse(struct Arena *arena, char *json_str);
+char *json_serialize(struct Arena *arena, const struct JsonValue *value);
 
 void json_free(struct JsonValue *value);
 
@@ -41,24 +45,17 @@ int json_get_bool(const struct JsonValue *value);
 double json_get_number(const struct JsonValue *value);
 const char *json_get_string(const struct JsonValue *value);
 
-int json_is_null(const struct JsonValue *value);
-int json_is_bool(const struct JsonValue *value);
-int json_is_number(const struct JsonValue *value);
-int json_is_string(const struct JsonValue *value);
-int json_is_array(const struct JsonValue *value);
-int json_is_object(const struct JsonValue *value);
+bool json_is_null(const struct JsonValue *value);
+bool json_is_bool(const struct JsonValue *value);
+bool json_is_number(const struct JsonValue *value);
+bool json_is_string(const struct JsonValue *value);
+bool json_is_array(const struct JsonValue *value);
+bool json_is_object(const struct JsonValue *value);
 
-struct JsonValue *json_create_null(); // Creates a JSON null value (Should just
-									  // be static const honestly)
-struct JsonValue *json_create_bool(int bool_value);
-struct JsonValue *json_create_number(double number_value);
-
-/*
- * Creates a JSON string value
- * @param const char* - The string value (will be duplicated)
- * @return struct JsonValue* - A pointer to the newly created JSON string value
- */
-struct JsonValue *json_create_string(const char *string_value);
-
-struct JsonValue *json_create_array();
-struct JsonValue *json_create_object();
+struct JsonValue *json_create_null(struct Arena *arena);
+struct JsonValue *json_create_bool(struct Arena *arena, int bool_value);
+struct JsonValue *json_create_number(struct Arena *arena, double number_value);
+struct JsonValue *json_create_string(struct Arena *arena,
+									 const char *string_value);
+struct JsonValue *json_create_array(struct Arena *arena);
+struct JsonValue *json_create_object(struct Arena *arena);

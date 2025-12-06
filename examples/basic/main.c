@@ -1,3 +1,4 @@
+#include "arena.h"
 #include "json.h"
 #include <log.h>
 #include <map.h>
@@ -6,35 +7,40 @@
 #include <stdlib.h>
 
 static void json_header_mw(struct Request *req, struct Response **res,
-						   bool *stop, void *user_data) {
+						   bool *stop, void *user_data, Arena *arena) {
 	(void)req;
 	(void)stop;
 	(void)user_data;
+	(void)arena;
 	if (*res && (*res)->headers) {
-		map_put((*res)->headers, "Content-Type",
-				"application/json; charset=utf-8");
+		(void)map_put((*res)->headers, "Content-Type",
+					  str_duplicate("application/json; charset=utf-8"));
 	}
 }
 
-struct Response *hello_handler(struct Request *request) {
+struct Response *hello_handler(struct Request *request, Arena *arena) {
 	(void)request;
-	return create_http_response(200, "Hello, World!");
+	return create_http_response(200, "Hello, World!", arena);
 }
 
-struct Response *param_route(struct Request *request) {
+struct Response *param_route(struct Request *request, Arena *arena) {
 	char *id = (char *)map_get(request->params, "id");
 	char buff[256];
 
-	struct JsonValue *response_json = json_create_object();
-	map_put(response_json->object_value, "id", json_create_string(id));
+	struct JsonValue *response_json = json_create_object(arena);
+	(void)map_put(response_json->object_value, "id",
+				  json_create_string(arena, id));
 
 	snprintf(buff, 256, "Hello, user %s!", id ? id : "unknown");
-	map_put(response_json->object_value, "message", json_create_string(buff));
+	(void)map_put(response_json->object_value, "message",
+				  json_create_string(arena, buff));
 
 	struct Response *r =
-		create_http_response(200, json_serialize(response_json));
-	json_free(response_json);
-	map_put(r->headers, "Content-Type", "application/json; charset=utf-8");
+		create_http_response(200, json_serialize(arena, response_json), arena);
+	// json_free not needed - arena handles cleanup
+	(void)map_put(
+		r->headers, "Content-Type",
+		arena_str_duplicate(arena, "application/json; charset=utf-8"));
 	return r;
 }
 
@@ -62,7 +68,6 @@ int main() {
 	// Cleanup (this won't be reached unless server_start returns)
 
 	server_destroy(&server);
-	router_destroy(api);
 	logger_cleanup();
 
 	return 0;

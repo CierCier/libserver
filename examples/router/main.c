@@ -7,41 +7,46 @@
 #include <stringbuilder.h>
 
 static void logger_mw(struct Request *req, struct Response **res, bool *stop,
-					  void *user_data) {
+					  void *user_data, Arena *arena) {
 	(void)user_data;
+	(void)arena;
+	(void)res;
 	app_log(LOG_LEVEL_INFO, "Incoming %d %s", req->method, req->path);
 	(void)stop; // allow chain to continue
 }
 
 static void json_mw(struct Request *req, struct Response **res, bool *stop,
-					void *user_data) {
+					void *user_data, Arena *arena) {
 	(void)req;
 	(void)user_data;
 	(void)stop;
+	(void)arena;
 	// Force JSON content-type if a response is produced later by handler
 	if (*res && (*res)->headers) {
-		map_put((*res)->headers, "Content-Type",
-				"application/json; charset=utf-8");
+		(void)map_put((*res)->headers, "Content-Type",
+					  "application/json; charset=utf-8");
 	}
 }
 
 // Helper to build a tiny JSON string without full json builder (keep
 // dependencies minimal)
-static struct Response *json_response(int status, const char *json) {
-	struct Response *r = create_http_response(status, json);
-	map_put(r->headers, "Content-Type", "application/json; charset=utf-8");
+static struct Response *json_response(int status, const char *json,
+									  Arena *arena) {
+	struct Response *r = create_http_response(status, json, arena);
+	(void)map_put(r->headers, "Content-Type",
+				  "application/json; charset=utf-8");
 	return r;
 }
 
-static struct Response *hello_handler(struct Request *req) {
+static struct Response *hello_handler(struct Request *req, Arena *arena) {
 	(void)req;
-	return json_response(200, "{\"message\":\"hello from API\"}");
+	return json_response(200, "{\"message\":\"hello from API\"}", arena);
 }
 
-static struct Response *echo_query_handler(struct Request *req) {
+static struct Response *echo_query_handler(struct Request *req, Arena *arena) {
 	// returns query params as a naive JSON object string for demo
 	// WARNING: no escaping for brevity
-	struct StringBuilder *sb = sb_create(0);
+	StringBuilder *sb = sb_create(arena, 0);
 	sb_append(sb, "{");
 	bool first = true;
 	for (size_t i = 0; i < req->query_params->bucket_count; i++) {
@@ -62,24 +67,24 @@ static struct Response *echo_query_handler(struct Request *req) {
 	sb_append(sb, "}");
 	char *json = sb_to_string(sb);
 	sb_destroy(sb);
-	struct Response *r = json_response(200, json);
-	free(json);
+	struct Response *r = json_response(200, json, arena);
 	return r;
 }
 
 #include "protocols/ftp_http.h"
 
-static void ftp_middleware(struct Request *req, struct Response **res, bool *stop, void *user_data) {
+static void ftp_middleware(struct Request *req, struct Response **res,
+						   bool *stop, void *user_data, Arena *arena) {
 	(void)user_data;
 	if (starts_with(req->path, "/ftp")) {
 		char *original_path = req->path;
 		// Strip /ftp. If path is just /ftp, it becomes empty string, map to /
 		const char *subpath = req->path + 4;
-		if (*subpath == '\0') subpath = "/";
-		
-		req->path = str_duplicate(subpath);
-		*res = ftp_http_handler(req);
-		free(req->path);
+		if (*subpath == '\0')
+			subpath = "/";
+
+		req->path = arena_str_duplicate(arena, subpath);
+		*res = ftp_http_handler(req, arena);
 		req->path = original_path;
 		*stop = true;
 	}
@@ -112,6 +117,5 @@ int main() {
 
 	server_start(&server);
 	server_destroy(&server);
-	router_destroy(api);
 	return 0;
 }

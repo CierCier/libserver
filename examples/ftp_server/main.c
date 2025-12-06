@@ -56,6 +56,16 @@ void *client_handler(void *arg) {
 		send_ftp_response(client_sock, FTP_RESP_220);
 	}
 
+#include "arena.h"
+
+// ... inside client_handler ...
+
+	Arena *arena = arena_create();
+	if (!arena) {
+		close(client_sock);
+		return NULL;
+	}
+
 	char buffer[FTP_BUFFER_SIZE];
 	while (1) {
 		memset(buffer, 0, sizeof(buffer));
@@ -68,7 +78,7 @@ void *client_handler(void *arg) {
 		if (cmd) {
 			printf("Received command: %s %s\n",
 				   ftp_command_to_string(cmd->command), cmd->argument);
-			handle_ftp_command(&ctx, cmd);
+			handle_ftp_command(&ctx, cmd, arena);
 			bool quit = (cmd->command == FTP_CMD_QUIT || cmd->command == FTP_CMD_HTTP_GET);
 			free_ftp_command(cmd);
 			if (quit)
@@ -77,6 +87,8 @@ void *client_handler(void *arg) {
 			send_ftp_response(client_sock, FTP_RESP_500);
 		}
 	}
+	
+	arena_destroy(arena);
 
 	if (ctx.data_listener_sock >= 0)
 		close(ctx.data_listener_sock);

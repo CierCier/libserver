@@ -1,19 +1,19 @@
 #define _GNU_SOURCE
-#include "common.h"
 #include "protocols/ftp.h"
+#include "common.h"
 #include "protocols/ftp_http.h"
-#include "stringbuilder.h"
+
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <limits.h>
 
 struct S_FtpCommand *parse_ftp_command(const char *cmd_str) {
 	if (!cmd_str)
@@ -82,7 +82,7 @@ struct S_FtpCommand *parse_ftp_command(const char *cmd_str) {
 				*end = '\0';
 				end--;
 			}
-			
+
 			// Special handling for HTTP GET: remove " HTTP/1.1" suffix
 			if (cmd->command == FTP_CMD_HTTP_GET) {
 				char *http_ver = strstr(cmd->argument, " HTTP/");
@@ -93,14 +93,16 @@ struct S_FtpCommand *parse_ftp_command(const char *cmd_str) {
 				if (strlen(cmd->argument) == 0) {
 					strcpy(cmd->argument, ".");
 				} else if (strcmp(cmd->argument, "/") == 0) {
-                    // Map root to current directory
-                    strcpy(cmd->argument, ".");
-                } else if (cmd->argument[0] == '/') {
-                    // Remove leading slash for local file system access (simplified)
-                    // In real app, we'd map this properly
-                    memmove(cmd->argument, cmd->argument + 1, strlen(cmd->argument));
-                    if (strlen(cmd->argument) == 0) strcpy(cmd->argument, ".");
-                }
+					// Map root to current directory
+					strcpy(cmd->argument, ".");
+				} else if (cmd->argument[0] == '/') {
+					// Remove leading slash for local file system access
+					// (simplified) In real app, we'd map this properly
+					memmove(cmd->argument, cmd->argument + 1,
+							strlen(cmd->argument));
+					if (strlen(cmd->argument) == 0)
+						strcpy(cmd->argument, ".");
+				}
 			}
 		}
 	}
@@ -125,7 +127,8 @@ static int open_data_connection(struct FtpContext *ctx) {
 	if (ctx->data_listener_sock >= 0) {
 		struct sockaddr_in client_addr;
 		socklen_t len = sizeof(client_addr);
-		int sock = accept(ctx->data_listener_sock, (struct sockaddr *)&client_addr, &len);
+		int sock = accept(ctx->data_listener_sock,
+						  (struct sockaddr *)&client_addr, &len);
 		if (sock >= 0) {
 			close(ctx->data_listener_sock);
 			ctx->data_listener_sock = -1;
@@ -135,10 +138,10 @@ static int open_data_connection(struct FtpContext *ctx) {
 	return -1;
 }
 
-void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
+void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd, Arena *arena) {
 	if (!ctx || !cmd)
 		return;
-	
+
 	int client_sock = ctx->control_sock;
 
 	switch (cmd->command) {
@@ -161,16 +164,18 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 	case FTP_CMD_CWD: {
 		char new_path[PATH_MAX];
 		if (cmd->argument[0] == '/') {
-			snprintf(new_path, sizeof(new_path), "%s", cmd->argument); // Treat as absolute
+			snprintf(new_path, sizeof(new_path), "%s",
+					 cmd->argument); // Treat as absolute
 		} else {
-			snprintf(new_path, sizeof(new_path), "%s/%s", ctx->current_dir, cmd->argument);
+			snprintf(new_path, sizeof(new_path), "%s/%s", ctx->current_dir,
+					 cmd->argument);
 		}
-		
+
 		char resolved[PATH_MAX];
 		if (realpath(new_path, resolved) && access(resolved, F_OK) == 0) {
 			// Security check: ensure we are still within root_dir
 			size_t root_len = strlen(ctx->root_dir);
-			if (strncmp(resolved, ctx->root_dir, root_len) != 0 || 
+			if (strncmp(resolved, ctx->root_dir, root_len) != 0 ||
 				(resolved[root_len] != '\0' && resolved[root_len] != '/')) {
 				send_ftp_response(client_sock, FTP_RESP_550);
 				break;
@@ -179,7 +184,8 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 			struct stat st;
 			stat(resolved, &st);
 			if (S_ISDIR(st.st_mode)) {
-				strncpy(ctx->current_dir, resolved, sizeof(ctx->current_dir) - 1);
+				strncpy(ctx->current_dir, resolved,
+						sizeof(ctx->current_dir) - 1);
 				send_ftp_response(client_sock, FTP_RESP_200);
 			} else {
 				send_ftp_response(client_sock, FTP_RESP_550);
@@ -193,7 +199,8 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 		send_ftp_response(client_sock, FTP_RESP_200);
 		break;
 	case FTP_CMD_PORT:
-		send_ftp_response(client_sock, "502 Command not implemented (use PASV).");
+		send_ftp_response(client_sock,
+						  "502 Command not implemented (use PASV).");
 		break;
 	case FTP_CMD_PASV: {
 		// Create ephemeral listener
@@ -208,7 +215,8 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 		addr.sin_addr.s_addr = INADDR_ANY;
 		addr.sin_port = 0; // Ephemeral
 
-		if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) < 0 || listen(listener, 1) < 0) {
+		if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+			listen(listener, 1) < 0) {
 			close(listener);
 			send_ftp_response(client_sock, FTP_RESP_425);
 			return;
@@ -217,14 +225,15 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 		socklen_t len = sizeof(addr);
 		getsockname(listener, (struct sockaddr *)&addr, &len);
 		int port = ntohs(addr.sin_port);
-		
+
 		ctx->data_listener_sock = listener;
 
-		// Get local IP (hacky, assume 127.0.0.1 for now or use getsockname on control sock)
-		// For browser compatibility, we need the IP the client connected to.
-		// Here we just send 127,0,0,1
+		// Get local IP (hacky, assume 127.0.0.1 for now or use getsockname on
+		// control sock) For browser compatibility, we need the IP the client
+		// connected to. Here we just send 127,0,0,1
 		char resp[FTP_BUFFER_SIZE];
-		snprintf(resp, sizeof(resp), FTP_RESP_227, 127, 0, 0, 1, port / 256, port % 256);
+		snprintf(resp, sizeof(resp), FTP_RESP_227, 127, 0, 0, 1, port / 256,
+				 port % 256);
 		send_ftp_response(client_sock, resp);
 		break;
 	}
@@ -242,16 +251,19 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 			char line[FTP_BUFFER_SIZE];
 			while ((dir = readdir(d)) != NULL) {
 				char full_path[PATH_MAX];
-				snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir, dir->d_name);
-				
+				snprintf(full_path, sizeof(full_path), "%s/%s",
+						 ctx->current_dir, dir->d_name);
+
 				struct stat st;
 				if (stat(full_path, &st) == 0) {
 					char date[64];
-					strftime(date, sizeof(date), "%b %d %H:%M", localtime(&st.st_mtime));
-					
-					snprintf(line, sizeof(line), "%s 1 ftp ftp %ld %s %s\r\n", 
-						(S_ISDIR(st.st_mode)) ? "drwxr-xr-x" : "-rw-r--r--",
-						st.st_size, date, dir->d_name);
+					strftime(date, sizeof(date), "%b %d %H:%M",
+							 localtime(&st.st_mtime));
+
+					snprintf(line, sizeof(line), "%s 1 ftp ftp %ld %s %s\r\n",
+							 (S_ISDIR(st.st_mode)) ? "drwxr-xr-x"
+												   : "-rw-r--r--",
+							 st.st_size, date, dir->d_name);
 					write(data_sock, line, strlen(line));
 				}
 			}
@@ -267,9 +279,10 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 			send_ftp_response(client_sock, FTP_RESP_425);
 			return;
 		}
-		
+
 		char full_path[PATH_MAX];
-		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir, cmd->argument);
+		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir,
+				 cmd->argument);
 
 		FILE *f = fopen(full_path, "rb");
 		if (f) {
@@ -294,7 +307,7 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 			send_ftp_response(client_sock, FTP_RESP_425);
 			return;
 		}
-		
+
 		// Security check
 		if (strstr(cmd->argument, "..")) {
 			close(data_sock);
@@ -303,7 +316,8 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 		}
 
 		char full_path[PATH_MAX];
-		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir, cmd->argument);
+		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir,
+				 cmd->argument);
 
 		FILE *f = fopen(full_path, "wb");
 		if (f) {
@@ -329,7 +343,8 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 			break;
 		}
 		char full_path[PATH_MAX];
-		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir, cmd->argument);
+		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir,
+				 cmd->argument);
 		if (mkdir(full_path, 0755) == 0) {
 			send_ftp_response(client_sock, "257 Directory created.");
 		} else {
@@ -344,7 +359,8 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 			break;
 		}
 		char full_path[PATH_MAX];
-		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir, cmd->argument);
+		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir,
+				 cmd->argument);
 		if (rmdir(full_path) == 0) {
 			send_ftp_response(client_sock, FTP_RESP_250);
 		} else {
@@ -359,29 +375,30 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd) {
 			break;
 		}
 		char full_path[PATH_MAX];
-		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir, cmd->argument);
+		snprintf(full_path, sizeof(full_path), "%s/%s", ctx->current_dir,
+				 cmd->argument);
 		if (unlink(full_path) == 0) {
 			send_ftp_response(client_sock, FTP_RESP_250);
 		} else {
 			send_ftp_response(client_sock, FTP_RESP_550);
 		}
 		break;
-	}
-		break;
+	} break;
 	case FTP_CMD_HTTP_GET: {
 		// Serve HTTP response
 		// Use the shared FTP HTTP handler
 		struct Request req = {0};
 		req.method = HTTP_GET;
 		req.path = cmd->argument;
-		
-		struct Response *res = ftp_handle_http_request_with_options(&req, ctx->current_dir, ctx->css_path);
+
+		struct Response *res = ftp_handle_http_request_with_options(
+			&req, ctx->current_dir, ctx->css_path, arena);
 		if (res) {
 			send_http_response(client_sock, res);
-			free_http_response(res);
 		} else {
 			// Fallback error
-			const char *err = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+			const char *err = "HTTP/1.1 500 Internal Server "
+							  "Error\r\nContent-Length: 0\r\n\r\n";
 			write(client_sock, err, strlen(err));
 		}
 		break;

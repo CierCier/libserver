@@ -8,10 +8,11 @@
 
 // Middleware function signature. Middleware can optionally set a Response*
 // (which short-circuits further processing) and/or set stop=true to halt the
-// chain. user_data is provided at registration time.
+// chain. user_data is provided at registration time. Arena is for memory
+// allocation.
 typedef void (*MiddlewareFunc)(struct Request *request,
 							   struct Response **response, bool *stop,
-							   void *user_data);
+							   void *user_data, Arena *arena);
 
 struct MiddlewareNode {
 	MiddlewareFunc fn;
@@ -22,6 +23,7 @@ struct MiddlewareNode {
 struct Router {
 	struct Map *routes;				   // key: "method:/path" (relative path)
 	struct MiddlewareNode *middleware; // router-level middleware chain
+	Arena *arena;					   // arena for router allocations
 };
 
 struct Mount {
@@ -48,6 +50,8 @@ struct Server {
 	// New: global middleware chain and mounted routers
 	struct MiddlewareNode *middleware; // global middleware
 	struct Mount *mounts;			   // linked list of mounts
+
+	Arena *arena; // arena for server allocations
 };
 
 void server_init(struct Server *server, const char *address, int port);

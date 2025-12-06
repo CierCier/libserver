@@ -1,29 +1,46 @@
+#include "arena.h"
 #include "common.h"
 #include "log.h"
 #include "map.h"
 #include <arpa/inet.h>
 #include <server.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+// Global pointer for signal handler to access the running server
+static struct Server *g_server_instance = NULL;
+static struct sigaction g_old_sigint_action;
+static struct sigaction g_old_sigterm_action;
+
+static void signal_handler(int sig) {
+	if (g_server_instance) {
+		app_log(LOG_LEVEL_INFO, "Received signal %d, shutting down server...",
+				sig);
+		server_stop(g_server_instance);
+	}
+}
+
 static void run_middleware_chain(struct MiddlewareNode *head,
-								 struct Request *req, struct Response **resp) {
+								 struct Request *req, struct Response **resp,
+								 Arena *arena) {
 	bool stop = false;
 	struct MiddlewareNode *cur = head;
 	while (cur && !stop && (!(*resp))) {
-		cur->fn(req, resp, &stop, cur->user_data);
+		cur->fn(req, resp, &stop, cur->user_data, arena);
 		cur = cur->next;
 	}
 }
 
 static struct Response *dispatch_to_endpoint(struct EndPoint *endpoint,
-											 struct Request *request) {
+											 struct Request *request,
+											 Arena *arena) {
 	if (endpoint && endpoint->handler) {
 		app_log(LOG_LEVEL_INFO, "Handling request for %s", request->path);
-		return endpoint->handler(request);
+		return endpoint->handler(request, arena);
 	}
 	return NULL;
 }
@@ -31,7 +48,8 @@ static struct Response *dispatch_to_endpoint(struct EndPoint *endpoint,
 static struct EndPoint *match_endpoint_in_map(struct Map *routes,
 											  HttpMethod method,
 											  const char *path_key,
-											  struct Request *request) {
+											  struct Request *request,
+											  Arena *arena) {
 	if (!routes)
 		return NULL;
 	// 1) try exact match first
@@ -56,7 +74,7 @@ static struct EndPoint *match_endpoint_in_map(struct Map *routes,
 						int end = pm[k + 1].rm_eo;
 						if (start >= 0 && end >= start) {
 							size_t plen = (size_t)(end - start);
-							char *val = malloc(plen + 1);
+							char *val = arena_alloc(arena, plen + 1);
 							memcpy(val, path_key + start, plen);
 							val[plen] = '\0';
 							map_put(request->params, ep->param_names[k], val);
@@ -73,7 +91,8 @@ static struct EndPoint *match_endpoint_in_map(struct Map *routes,
 
 static struct EndPoint *match_mounted_router(struct Server *server,
 											 struct Request *request,
-											 struct Router **out_router) {
+											 struct Router **out_router,
+											 Arena *arena) {
 	struct Mount *m = server->mounts;
 	size_t best_len = 0;
 	struct EndPoint *best_ep = NULL;
@@ -87,7 +106,7 @@ static struct EndPoint *match_mounted_router(struct Server *server,
 				rel = "/"; // exact mount path -> root within router
 			// Match within router (relative path)
 			struct EndPoint *ep = match_endpoint_in_map(
-				m->router->routes, request->method, rel, request);
+				m->router->routes, request->method, rel, request, arena);
 			if (ep && base_len > best_len) {
 				best_len = base_len;
 				best_ep = ep;
@@ -101,6 +120,7 @@ static struct EndPoint *match_mounted_router(struct Server *server,
 	return best_ep;
 }
 
+#define REQ_BUFFER_SIZE 65536
 void handle_client(void *arg) {
 	if (!arg)
 		return;
@@ -109,22 +129,27 @@ void handle_client(void *arg) {
 	struct Server *server = (struct Server *)args[0];
 	int client_sock = *(int *)args[1];
 
-	free(args[1]);
-	free(arg);
+	Arena *arena = arena_create();
+	if (!arena) {
+		close(client_sock);
+		return;
+	}
 
-	char buffer[4096];
+	char buffer[REQ_BUFFER_SIZE];
 	memset(buffer, 0, sizeof(buffer));
 	ssize_t bytes_read = read(client_sock, buffer, sizeof(buffer) - 1);
 	if (bytes_read < 0) {
 		perror("read");
 		close(client_sock);
+		arena_destroy(arena);
 		return;
 	}
 
-	struct Request *request = parse_http_request(buffer);
+	struct Request *request = parse_http_request(buffer, arena);
 	if (!request) {
 		app_log(LOG_LEVEL_ERROR, "Failed to parse HTTP request");
 		close(client_sock);
+		arena_destroy(arena);
 		return;
 	}
 
@@ -132,7 +157,7 @@ void handle_client(void *arg) {
 
 	// Run global middleware first (can short-circuit)
 	if (server->middleware) {
-		run_middleware_chain(server->middleware, request, &response);
+		run_middleware_chain(server->middleware, request, &response, arena);
 	}
 
 	struct Router *matched_router = NULL;
@@ -141,21 +166,22 @@ void handle_client(void *arg) {
 	if (!response) {
 		// Try server-level match (exact or pattern)
 		endpoint = match_endpoint_in_map(server->endpoints, request->method,
-										 request->path, request);
+										 request->path, request, arena);
 
 		// If not found, try mounted routers
 		if (!endpoint) {
-			endpoint = match_mounted_router(server, request, &matched_router);
+			endpoint =
+				match_mounted_router(server, request, &matched_router, arena);
 		}
 
 		// If router matched, run router-level middleware before handler
 		if (matched_router && matched_router->middleware) {
-			run_middleware_chain(matched_router->middleware, request,
-								 &response);
+			run_middleware_chain(matched_router->middleware, request, &response,
+								 arena);
 		}
 
 		if (!response) {
-			response = dispatch_to_endpoint(endpoint, request);
+			response = dispatch_to_endpoint(endpoint, request, arena);
 		}
 	}
 
@@ -163,35 +189,39 @@ void handle_client(void *arg) {
 		app_log(LOG_LEVEL_WARNING, "No handler for %s, using 404",
 				request->path);
 		if (server->not_found_endpoint && server->not_found_endpoint->handler) {
-			response = server->not_found_endpoint->handler(request);
+			response = server->not_found_endpoint->handler(request, arena);
 		} else {
-			response = create_http_response(404, "Not Found");
+			response = create_http_response(404, "Not Found", arena);
 		}
 	}
 	if (!response) {
 		app_log(LOG_LEVEL_ERROR, "Handler returned NULL response, %s",
 				request->path);
 
-		response = create_http_response(500, "Internal Server Error");
+		response = create_http_response(500, "Internal Server Error", arena);
 	}
 
 	send_http_response(client_sock, response);
 
-	free_http_request(request);
-	free_http_response(response);
+	arena_destroy(arena);
 	close(client_sock);
 }
-
-static struct Response *__not_found_handler_default(struct Request *request) {
+static struct Response *__not_found_handler_default(struct Request *request,
+													Arena *arena) {
 	(void)request;
-	return create_http_response(404, "Not Found");
+	return create_http_response(404, "Not Found", arena);
 }
 
 void server_init(struct Server *server, const char *address, int port) {
 	if (!server)
 		return;
 
-	server->address = str_duplicate(address ? address : "localhost");
+	server->arena = arena_create();
+	if (!server->arena)
+		return;
+
+	server->address =
+		arena_str_duplicate(server->arena, address ? address : "localhost");
 	server->port = port;
 	server->sockfd = -1;
 	pthread_mutex_init(&server->lock, NULL);
@@ -210,8 +240,8 @@ void server_init(struct Server *server, const char *address, int port) {
 
 	server->running = false;
 
-	server->endpoints = malloc(sizeof(struct Map));
-	map_init(server->endpoints, 53);
+	server->endpoints = arena_alloc(server->arena, sizeof(struct Map));
+	map_init(server->endpoints, server->arena, 53);
 
 	server->not_found_endpoint =
 		endpoint_create(HTTP_GET, "/404", __not_found_handler_default);
@@ -226,13 +256,13 @@ void server_destroy(struct Server *server) {
 
 	server_stop(server);
 
-	free(server->address);
+	// server->address is arena-allocated, no need to free
 	pthread_mutex_destroy(&server->lock);
 
 	thread_pool_destroy(server->thread_pool);
 	free(server->thread_pool);
 
-	// Free all endpoints
+	// Free all endpoints (endpoint_destroy uses malloc internally)
 	for (size_t i = 0; i < server->endpoints->bucket_count; i++) {
 		struct MapEntry *entry = server->endpoints->buckets[i];
 		while (entry) {
@@ -243,9 +273,10 @@ void server_destroy(struct Server *server) {
 	}
 
 	map_destroy(server->endpoints);
-	free(server->endpoints);
+	// server->endpoints is arena-allocated, no need to free
+	endpoint_destroy(server->not_found_endpoint);
 
-	// Free middleware chain
+	// Middleware nodes are still malloc'd, free them
 	struct MiddlewareNode *mn = server->middleware;
 	while (mn) {
 		struct MiddlewareNode *next = mn->next;
@@ -257,12 +288,22 @@ void server_destroy(struct Server *server) {
 	struct Mount *mt = server->mounts;
 	while (mt) {
 		struct Mount *next = mt->next;
-		free(mt->base_path);
-		// Router will be destroyed by router_destroy if user calls it; do not
-		// free here
+		// mt->base_path is arena-allocated, handled by router_destroy's arena
+		router_destroy(mt->router);
 		free(mt);
 		mt = next;
 	}
+
+	// Destroy the arena last - this frees all arena-allocated memory
+	arena_destroy(server->arena);
+}
+
+static void handle_client_arg_destroy(void *arg) {
+	if (!arg)
+		return;
+	void **args = (void **)arg;
+	free(args[1]);
+	free(args);
 }
 
 void server_start(struct Server *server) {
@@ -307,6 +348,16 @@ void server_start(struct Server *server) {
 	server->running = true;
 	printf("Server started on %s:%d\n", server->address, server->port);
 
+	// Set up signal handlers for graceful shutdown
+	g_server_instance = server;
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = signal_handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+	sigaction(SIGINT, &sa, &g_old_sigint_action);
+	sigaction(SIGTERM, &sa, &g_old_sigterm_action);
+
 	// Main accept loop
 
 	while (server->running) {
@@ -327,11 +378,18 @@ void server_start(struct Server *server) {
 		void **args = malloc(2 * sizeof(void *));
 		args[0] = (void *)server;
 		args[1] = (void *)pclient;
-		thread_pool_add_task(server->thread_pool, handle_client, args);
+		thread_pool_add_task(server->thread_pool, handle_client, args,
+							 handle_client_arg_destroy);
 	}
+
+	// Restore original signal handlers
+	sigaction(SIGINT, &g_old_sigint_action, NULL);
+	sigaction(SIGTERM, &g_old_sigterm_action, NULL);
+	g_server_instance = NULL;
 
 	close(server->sockfd);
 	server->sockfd = -1;
+	printf("Server stopped\n");
 }
 
 void server_stop(struct Server *server) {
@@ -358,7 +416,11 @@ void server_add_endpoint(struct Server *server, HttpMethod method,
 	char key[256];
 	snprintf(key, sizeof(key), "%d:%s", method, path);
 
-	map_put(server->endpoints, key, endpoint);
+	struct EndPoint *old_endpoint =
+		(struct EndPoint *)map_put(server->endpoints, key, endpoint);
+	if (old_endpoint) {
+		endpoint_destroy(old_endpoint);
+	}
 }
 
 void server_remove_endpoint(struct Server *server, const char *path,
@@ -399,8 +461,13 @@ struct Router *router_create(void) {
 	struct Router *r = malloc(sizeof(struct Router));
 	if (!r)
 		return NULL;
-	r->routes = malloc(sizeof(struct Map));
-	map_init(r->routes, 53);
+	r->arena = arena_create();
+	if (!r->arena) {
+		free(r);
+		return NULL;
+	}
+	r->routes = arena_alloc(r->arena, sizeof(struct Map));
+	map_init(r->routes, r->arena, 53);
 	r->middleware = NULL;
 	return r;
 }
@@ -408,7 +475,7 @@ struct Router *router_create(void) {
 void router_destroy(struct Router *router) {
 	if (!router)
 		return;
-	// free endpoints inside routes map
+	// free endpoints inside routes map (they use malloc internally)
 	for (size_t i = 0; i < router->routes->bucket_count; i++) {
 		struct MapEntry *entry = router->routes->buckets[i];
 		while (entry) {
@@ -418,14 +485,16 @@ void router_destroy(struct Router *router) {
 		}
 	}
 	map_destroy(router->routes);
-	free(router->routes);
-	// free middleware
+	// router->routes is arena-allocated, no need to free
+	// free middleware (still uses malloc)
 	struct MiddlewareNode *mn = router->middleware;
 	while (mn) {
 		struct MiddlewareNode *next = mn->next;
 		free(mn);
 		mn = next;
 	}
+	// Destroy the arena - this frees all arena-allocated memory
+	arena_destroy(router->arena);
 	free(router);
 }
 
@@ -453,7 +522,11 @@ void router_add(struct Router *router, HttpMethod method, const char *path,
 	struct EndPoint *endpoint = endpoint_create(method, path, handler);
 	char key[256];
 	snprintf(key, sizeof(key), "%d:%s", method, path);
-	map_put(router->routes, key, endpoint);
+	struct EndPoint *old_endpoint =
+		(struct EndPoint *)map_put(router->routes, key, endpoint);
+	if (old_endpoint) {
+		endpoint_destroy(old_endpoint);
+	}
 }
 
 void server_mount_router(struct Server *server, const char *base_path,

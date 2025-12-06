@@ -1,5 +1,7 @@
-#pragma once
+#ifndef COMMON_H
+#define COMMON_H
 
+#include "arena.h"
 #include <pthread.h>
 #include <regex.h>
 #include <stdbool.h>
@@ -29,13 +31,8 @@ struct Response {
 		*headers; // Map of headers (key: header name, value: header value)
 };
 
-/*
- * Function pointer type for request handlers
- * @param const char* - The request data (e.g., URL, headers, body)
- * @return struct Response* - The response data (e.g., status code, headers,
- * body)
- */
-typedef struct Response *(*RequestHandler)(struct Request *request);
+typedef struct Response *(*RequestHandler)(struct Request *request,
+										   Arena *arena);
 
 struct EndPoint {
 	HttpMethod method;
@@ -69,7 +66,7 @@ bool ends_with(const char *str, const char *suffix);
 bool starts_with(const char *str, const char *prefix);
 
 /*
- * Duplicates a string
+ * Duplicates a string using malloc.
  * @param const char* - The string to duplicate
  * @return char* - A new string that is a duplicate of the input
  */
@@ -89,22 +86,24 @@ struct ThreadPool {
 struct Task {
 	void (*function)(void *);
 	void *arg;
+	void (*arg_destroy)(void *);
 	struct Task *next;
 };
 
 void thread_pool_init(struct ThreadPool *pool, size_t thread_count);
 void thread_pool_destroy(struct ThreadPool *pool);
 void thread_pool_add_task(struct ThreadPool *pool, void (*function)(void *),
-						  void *arg);
+						  void *arg, void (*arg_destroy)(void *));
 
 void *thread_pool_worker(void *arg);
 
 size_t get_cpu_cores();
 
-struct Request *parse_http_request(const char *raw_request);
-void free_http_request(struct Request *request);
+struct Request *parse_http_request(char *raw_request, Arena *arena);
 
-struct Response *create_http_response(int status_code, const char *body);
-void free_http_response(struct Response *response);
+struct Response *create_http_response(int status_code, const char *body,
+									  Arena *arena);
 
 void send_http_response(int client_sock, struct Response *response);
+
+#endif // COMMON_H

@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+struct Arena;
+
 struct MapEntry {
 	char *key;
 	void *value;
@@ -14,12 +16,13 @@ struct Map {
 	struct MapEntry **buckets;
 	size_t bucket_count;
 	pthread_mutex_t lock;
+	struct Arena *arena;
 };
 
-void map_init(struct Map *map, size_t bucket_count);
+void map_init(struct Map *map, struct Arena *arena, size_t bucket_count);
 void map_destroy(struct Map *map);
 
-bool map_put(struct Map *map, const char *key, void *value);
+void *map_put(struct Map *map, const char *key, void *value);
 void *map_get(struct Map *map, const char *key);
 bool map_remove(struct Map *map, const char *key);
 bool map_contains(struct Map *map, const char *key);

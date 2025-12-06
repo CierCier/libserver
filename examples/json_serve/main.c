@@ -6,42 +6,42 @@
 #include <stdlib.h>
 
 static void json_header_mw(struct Request *req, struct Response **res,
-						   bool *stop, void *ud) {
+						   bool *stop, void *ud, Arena *arena) {
 	(void)req;
 	(void)stop;
 	(void)ud;
+	(void)arena;
 	if (*res && (*res)->headers) {
-		map_put((*res)->headers, "Content-Type",
-				"application/json; charset=utf-8");
+		(void)map_put((*res)->headers, "Content-Type",
+					  str_duplicate("application/json; charset=utf-8"));
 	}
 }
 
-struct Response *ping_handler(struct Request *request) {
+struct Response *ping_handler(struct Request *request, Arena *arena) {
 	(void)request;
-	struct JsonValue *response_json = json_create_object();
+	struct JsonValue *response_json = json_create_object(arena);
 
-	map_put(response_json->object_value, "status", json_create_string("OK"));
-	map_put(response_json->object_value, "message",
-			json_create_string("Pong from libserver!"));
+	(void)map_put(response_json->object_value, "status",
+				  json_create_string(arena, "OK"));
+	(void)map_put(response_json->object_value, "message",
+				  json_create_string(arena, "Pong from libserver!"));
 
-	char *response_body = json_serialize(response_json);
-	json_free(response_json);
-	struct Response *r = create_http_response(200, response_body);
-	map_put(r->headers, "Content-Type", "application/json; charset=utf-8");
-	free(response_body);
+	char *response_body = json_serialize(arena, response_json);
+	struct Response *r = create_http_response(200, response_body, arena);
+	(void)map_put(r->headers, "Content-Type",
+				  str_duplicate("application/json; charset=utf-8"));
 	return r;
 }
 
-struct Response *not_found_handler(struct Request *request) {
+struct Response *not_found_handler(struct Request *request, Arena *arena) {
 	(void)request;
-	struct JsonValue *response_json = json_create_object();
-	map_put(response_json->object_value, "error",
-			json_create_string("Not Found"));
-	char *response_body = json_serialize(response_json);
-	json_free(response_json);
-	struct Response *r = create_http_response(404, response_body);
-	map_put(r->headers, "Content-Type", "application/json; charset=utf-8");
-	free(response_body);
+	struct JsonValue *response_json = json_create_object(arena);
+	(void)map_put(response_json->object_value, "error",
+				  json_create_string(arena, "Not Found"));
+	char *response_body = json_serialize(arena, response_json);
+	struct Response *r = create_http_response(404, response_body, arena);
+	(void)map_put(r->headers, "Content-Type",
+				  str_duplicate("application/json; charset=utf-8"));
 	return r;
 }
 

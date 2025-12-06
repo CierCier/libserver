@@ -1,27 +1,35 @@
 #include "map.h"
-#include "common.h"
+#include "arena.h"
 #include <stdlib.h>
 #include <string.h>
 
-void map_init(struct Map *map, size_t bucket_count) {
-	if (!map)
+void map_init(struct Map *map, struct Arena *arena, size_t bucket_count) {
+	if (!map || !arena)
 		return;
+	map->arena = arena;
 	map->bucket_count = next_prime(bucket_count);
-	map->buckets = calloc(map->bucket_count, sizeof(struct MapEntry *));
+	map->buckets =
+		arena_alloc(arena, map->bucket_count * sizeof(struct MapEntry *));
+	if (map->buckets) {
+		memset(map->buckets, 0, map->bucket_count * sizeof(struct MapEntry *));
+	}
 	pthread_mutex_init(&map->lock, NULL);
 }
 
 void map_destroy(struct Map *map) {
 	if (!map)
 		return;
-	map_clear(map);
-	free(map->buckets);
+	// Arena allocations are freed when the arena is destroyed
+	// Just clear the pointers and destroy the mutex
+	map->buckets = NULL;
+	map->bucket_count = 0;
+	map->arena = NULL;
 	pthread_mutex_destroy(&map->lock);
 }
 
-bool map_put(struct Map *map, const char *key, void *value) {
+void *map_put(struct Map *map, const char *key, void *value) {
 	if (!map || !key)
-		return false;
+		return NULL;
 
 	size_t index = hash_string(key) % map->bucket_count;
 
@@ -30,27 +38,29 @@ bool map_put(struct Map *map, const char *key, void *value) {
 	struct MapEntry *entry = map->buckets[index];
 	while (entry) {
 		if (strcmp(entry->key, key) == 0) {
+			void *old_value = entry->value;
 			entry->value = value; // Update existing value
 			pthread_mutex_unlock(&map->lock);
-			return true;
+			return old_value;
 		}
 		entry = entry->next;
 	}
 
 	// Key not found, create a new entry
-	struct MapEntry *new_entry = malloc(sizeof(struct MapEntry));
+	struct MapEntry *new_entry =
+		arena_alloc(map->arena, sizeof(struct MapEntry));
 	if (!new_entry) {
 		pthread_mutex_unlock(&map->lock);
-		return false;
+		return NULL;
 	}
 
-	new_entry->key = str_duplicate(key);
+	new_entry->key = arena_str_duplicate(map->arena, key);
 	new_entry->value = value;
 	new_entry->next = map->buckets[index];
 	map->buckets[index] = new_entry;
 
 	pthread_mutex_unlock(&map->lock);
-	return true;
+	return NULL;
 }
 
 void *map_get(struct Map *map, const char *key) {
@@ -91,8 +101,8 @@ bool map_remove(struct Map *map, const char *key) {
 			} else {
 				map->buckets[index] = entry->next;
 			}
-			free(entry->key);
-			free(entry);
+			// Arena allocations are not individually freed
+			// Memory will be reclaimed when the arena is destroyed
 			pthread_mutex_unlock(&map->lock);
 			return true;
 		}
@@ -147,14 +157,10 @@ void map_clear(struct Map *map) {
 		return;
 
 	pthread_mutex_lock(&map->lock);
+	// Just clear the bucket pointers
+	// Arena allocations are not individually freed
+	// Memory will be reclaimed when the arena is destroyed
 	for (size_t i = 0; i < map->bucket_count; i++) {
-		struct MapEntry *entry = map->buckets[i];
-		while (entry) {
-			struct MapEntry *next = entry->next;
-			free(entry->key);
-			free(entry);
-			entry = next;
-		}
 		map->buckets[i] = NULL;
 	}
 	pthread_mutex_unlock(&map->lock);

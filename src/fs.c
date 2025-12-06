@@ -1,10 +1,13 @@
+#define _GNU_SOURCE
 #include "fs.h"
+#include "arena.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -60,7 +63,7 @@ bool file_exists(const char *file_path) {
 	return false;
 }
 
-char *read_file(const char *file_path) {
+char *fs_read_file(Arena *arena, const char *file_path) {
 	if (!file_path)
 		return NULL;
 
@@ -72,7 +75,7 @@ char *read_file(const char *file_path) {
 	size_t size = ftell(file);
 	fseek(file, 0, SEEK_SET);
 
-	char *content = malloc(size + 1);
+	char *content = arena_alloc(arena, size + 1);
 	if (!content) {
 		fclose(file);
 		return NULL;
@@ -82,4 +85,96 @@ char *read_file(const char *file_path) {
 	content[size] = '\0';
 	fclose(file);
 	return content;
+}
+
+// Memory-mapped file structure for efficient large file handling
+struct MappedFile *mmap_file(const char *file_path) {
+	if (!file_path)
+		return NULL;
+
+	int fd = open(file_path, O_RDONLY);
+	if (fd < 0)
+		return NULL;
+
+	struct stat st;
+	if (fstat(fd, &st) < 0) {
+		close(fd);
+		return NULL;
+	}
+
+	size_t size = st.st_size;
+	if (size == 0) {
+		close(fd);
+		return NULL;
+	}
+
+	void *data = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd); // fd can be closed after mmap
+
+	if (data == MAP_FAILED)
+		return NULL;
+
+	// Advise kernel for sequential access (good for serving files)
+	madvise(data, size, MADV_SEQUENTIAL);
+
+	struct MappedFile *mf = malloc(sizeof(struct MappedFile));
+	if (!mf) {
+		munmap(data, size);
+		return NULL;
+	}
+
+	mf->data = data;
+	mf->size = size;
+	return mf;
+}
+
+void munmap_file(struct MappedFile *mf) {
+	if (!mf)
+		return;
+	if (mf->data && mf->size > 0)
+		munmap(mf->data, mf->size);
+	free(mf);
+}
+
+// Read file using mmap - returns a malloc'd copy of the file content
+// More efficient for large files due to lazy loading
+char *read_file_mmap(const char *file_path) {
+	struct MappedFile *mf = mmap_file(file_path);
+	if (!mf)
+		return NULL;
+
+	char *content = malloc(mf->size + 1);
+	if (!content) {
+		munmap_file(mf);
+		return NULL;
+	}
+
+	memcpy(content, mf->data, mf->size);
+	content[mf->size] = '\0';
+
+	munmap_file(mf);
+	return content;
+}
+
+// Stream file to socket using mmap - zero-copy when possible
+int stream_file_mmap(int sockfd, const char *file_path) {
+	struct MappedFile *mf = mmap_file(file_path);
+	if (!mf)
+		return -1;
+
+	size_t total_sent = 0;
+	while (total_sent < mf->size) {
+		ssize_t sent =
+			write(sockfd, (char *)mf->data + total_sent, mf->size - total_sent);
+		if (sent < 0) {
+			if (errno == EINTR)
+				continue;
+			munmap_file(mf);
+			return -1;
+		}
+		total_sent += sent;
+	}
+
+	munmap_file(mf);
+	return 0;
 }
