@@ -1,4 +1,5 @@
-#pragma once
+#ifndef MAP_H
+#define MAP_H
 
 #include <pthread.h>
 #include <stdbool.h>
@@ -35,3 +36,5 @@ size_t hash_string(const char *str);
 size_t next_prime(size_t n);
 bool is_prime(size_t n);
 size_t prev_prime(size_t n);
+
+#endif // MAP_H

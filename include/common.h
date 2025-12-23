@@ -104,6 +104,7 @@ struct Request *parse_http_request(char *raw_request, Arena *arena);
 struct Response *create_http_response(int status_code, const char *body,
 									  Arena *arena);
 
-void send_http_response(int client_sock, struct Response *response);
+// SSL support: ssl can be NULL
+void send_http_response(int client_sock, void *ssl, struct Response *response);
 
 #endif // COMMON_H

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef STRINGBUILDER_H
+#define STRINGBUILDER_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -29,3 +30,5 @@ size_t sb_capacity(StringBuilder *sb);
 bool sb_is_empty(StringBuilder *sb);
 
 void sb_ensure_capacity(StringBuilder *sb, size_t additional_length);
+
+#endif // STRINGBUILDER_H

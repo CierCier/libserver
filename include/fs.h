@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FS_H
+#define FS_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -23,3 +24,5 @@ struct MappedFile *mmap_file(const char *file_path);
 void munmap_file(struct MappedFile *mf);
 char *read_file_mmap(const char *file_path);
 int stream_file_mmap(int sockfd, const char *file_path);
+
+#endif // FS_H

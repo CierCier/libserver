@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ARENA_H
+#define ARENA_H
 
 #include <stddef.h>
 
@@ -19,3 +20,5 @@ Arena *arena_create();
 void *arena_alloc(Arena *arena, size_t size);
 void arena_destroy(Arena *arena);
 char *arena_str_duplicate(Arena *arena, const char *str);
+
+#endif // ARENA_H

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef SERVER_H
+#define SERVER_H
 
 #include "common.h"
 
@@ -51,6 +52,10 @@ struct Server {
 	struct MiddlewareNode *middleware; // global middleware
 	struct Mount *mounts;			   // linked list of mounts
 
+	// SSL Context
+	void *ssl_ctx; // cast to SSL_CTX* in implementation
+	bool use_ssl;
+
 	Arena *arena; // arena for server allocations
 };
 
@@ -80,3 +85,8 @@ void router_add(struct Router *router, HttpMethod method, const char *path,
 // matches request path "/api/users".
 void server_mount_router(struct Server *server, const char *base_path,
 						 struct Router *router);
+
+void server_enable_https(struct Server *server, const char *cert_path,
+						 const char *key_path);
+
+#endif // SERVER_H

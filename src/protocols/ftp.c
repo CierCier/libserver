@@ -138,7 +138,8 @@ static int open_data_connection(struct FtpContext *ctx) {
 	return -1;
 }
 
-void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd, Arena *arena) {
+void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd,
+						Arena *arena) {
 	if (!ctx || !cmd)
 		return;
 
@@ -394,7 +395,7 @@ void handle_ftp_command(struct FtpContext *ctx, struct S_FtpCommand *cmd, Arena 
 		struct Response *res = ftp_handle_http_request_with_options(
 			&req, ctx->current_dir, ctx->css_path, arena);
 		if (res) {
-			send_http_response(client_sock, res);
+			send_http_response(client_sock, NULL, res);
 		} else {
 			// Fallback error
 			const char *err = "HTTP/1.1 500 Internal Server "

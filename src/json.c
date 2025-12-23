@@ -88,6 +88,7 @@ char *json_serialize(struct Arena *arena, const struct JsonValue *value) {
 						sb_append_char(sb, ',');
 					sb_append_char(sb, '"');
 					append_escaped_string(sb, entry->key);
+					sb_append_char(sb, '"');
 					sb_append(sb, ":");
 					char *val_str = json_serialize(
 						arena, (const struct JsonValue *)entry->value);

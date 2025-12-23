@@ -3,6 +3,7 @@
 #include "stringbuilder.h"
 #include <ctype.h>
 #include <fcntl.h>
+#include <openssl/ssl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -437,7 +438,7 @@ struct Response *create_http_response(int status_code, const char *body,
 	return response;
 }
 
-void send_http_response(int client_sock, struct Response *response) {
+void send_http_response(int client_sock, void *ssl, struct Response *response) {
 	if (!response || client_sock < 0)
 		return;
 
@@ -509,6 +510,6 @@ void send_http_response(int client_sock, struct Response *response) {
 		sb_append(sb, response->body);
 	}
 
-	write(client_sock, sb->buffer, sb->length);
+	if (ssl) { SSL_write((SSL *)ssl, sb->buffer, sb->length); } else { write(client_sock, sb->buffer, sb->length); }
 	sb_destroy(sb);
 }

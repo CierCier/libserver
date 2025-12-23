@@ -1,8 +1,11 @@
 #include "arena.h"
 #include "common.h"
+#include "http2.h"
 #include "log.h"
 #include "map.h"
 #include <arpa/inet.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <server.h>
 #include <signal.h>
 #include <stdio.h>
@@ -135,11 +138,49 @@ void handle_client(void *arg) {
 		return;
 	}
 
+	SSL *ssl = NULL;
+	if (server->use_ssl && server->ssl_ctx) {
+		ssl = SSL_new((SSL_CTX *)server->ssl_ctx);
+		SSL_set_fd(ssl, client_sock);
+		if (SSL_accept(ssl) <= 0) {
+			ERR_print_errors_fp(stderr);
+			SSL_free(ssl);
+			close(client_sock);
+			arena_destroy(arena);
+			return;
+		}
+	}
+
 	char buffer[REQ_BUFFER_SIZE];
 	memset(buffer, 0, sizeof(buffer));
-	ssize_t bytes_read = read(client_sock, buffer, sizeof(buffer) - 1);
+
+	ssize_t bytes_read;
+	if (ssl) {
+
+		const unsigned char *alpn = NULL;
+		unsigned int alpnlen = 0;
+		SSL_get0_alpn_selected(ssl, &alpn, &alpnlen);
+		if (alpn && alpnlen == 2 && memcmp(alpn, "h2", 2) == 0) {
+			app_log(LOG_LEVEL_INFO, "Negotiated HTTP/2");
+			handle_http2_session(server, client_sock, ssl);
+			// Clean up and return, session handled
+			SSL_shutdown(ssl);
+			SSL_free(ssl);
+			close(client_sock);
+			arena_destroy(arena);
+			return;
+		}
+
+		bytes_read = SSL_read(ssl, buffer, sizeof(buffer) - 1);
+	} else {
+
+		bytes_read = read(client_sock, buffer, sizeof(buffer) - 1);
+	}
+
 	if (bytes_read < 0) {
 		perror("read");
+		if (ssl)
+			SSL_free(ssl);
 		close(client_sock);
 		arena_destroy(arena);
 		return;
@@ -148,6 +189,8 @@ void handle_client(void *arg) {
 	struct Request *request = parse_http_request(buffer, arena);
 	if (!request) {
 		app_log(LOG_LEVEL_ERROR, "Failed to parse HTTP request");
+		if (ssl)
+			SSL_free(ssl);
 		close(client_sock);
 		arena_destroy(arena);
 		return;
@@ -201,8 +244,14 @@ void handle_client(void *arg) {
 		response = create_http_response(500, "Internal Server Error", arena);
 	}
 
-	send_http_response(client_sock, response);
+	send_http_response(client_sock, ssl, response);
+	app_log(LOG_LEVEL_INFO, "Response sent");
 
+	if (ssl) {
+		// SSL_shutdown(ssl); // skip shutdown for now to see if it fixes curl
+		// error
+		SSL_free(ssl);
+	}
 	arena_destroy(arena);
 	close(client_sock);
 }
@@ -248,11 +297,19 @@ void server_init(struct Server *server, const char *address, int port) {
 
 	server->middleware = NULL;
 	server->mounts = NULL;
+	server->ssl_ctx = NULL;
+	server->use_ssl = false;
+	server->ssl_ctx = NULL;
+	server->use_ssl = false;
 }
 
 void server_destroy(struct Server *server) {
 	if (!server)
 		return;
+
+	if (server->use_ssl && server->ssl_ctx) {
+		SSL_CTX_free((SSL_CTX *)server->ssl_ctx);
+	}
 
 	server_stop(server);
 
@@ -545,4 +602,56 @@ void server_mount_router(struct Server *server, const char *base_path,
 			cur = cur->next;
 		cur->next = m;
 	}
+}
+
+static int alpn_select_cb(SSL *ssl, const unsigned char **out,
+						  unsigned char *outlen, const unsigned char *in,
+						  unsigned int inlen, void *arg) {
+	unsigned char *protos = (unsigned char *)"\x02h2\x08http/1.1";
+	unsigned int protos_len = 12;
+
+	if (SSL_select_next_proto((unsigned char **)out, outlen, protos, protos_len,
+							  in, inlen) != OPENSSL_NPN_NEGOTIATED) {
+		return SSL_TLSEXT_ERR_NOACK;
+	}
+	return SSL_TLSEXT_ERR_OK;
+}
+
+void server_enable_https(struct Server *server, const char *cert_path,
+						 const char *key_path) {
+
+	if (!server || !cert_path || !key_path)
+		return;
+
+	SSL_load_error_strings();
+	OpenSSL_add_ssl_algorithms();
+
+	const SSL_METHOD *method = TLS_server_method();
+	SSL_CTX *ctx = SSL_CTX_new(method);
+	if (!ctx) {
+		app_log(LOG_LEVEL_ERROR, "Unable to create SSL context");
+		ERR_print_errors_fp(stderr);
+		return;
+	}
+
+	SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION); // Keep TLS 1.2 minimum
+	SSL_CTX_set_alpn_select_cb(ctx, alpn_select_cb, NULL);
+
+	if (SSL_CTX_use_certificate_file(ctx, cert_path, SSL_FILETYPE_PEM) <= 0) {
+		app_log(LOG_LEVEL_ERROR, "Failed to load certificate file");
+		ERR_print_errors_fp(stderr);
+		SSL_CTX_free(ctx);
+		return;
+	}
+
+	if (SSL_CTX_use_PrivateKey_file(ctx, key_path, SSL_FILETYPE_PEM) <= 0) {
+		app_log(LOG_LEVEL_ERROR, "Failed to load private key file");
+		ERR_print_errors_fp(stderr);
+		SSL_CTX_free(ctx);
+		return;
+	}
+
+	server->ssl_ctx = ctx;
+	server->use_ssl = true;
+	app_log(LOG_LEVEL_INFO, "HTTPS enabled");
 }

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef JSON_H
+#define JSON_H
 
 #include "map.h"
 #include <stddef.h>
@@ -59,3 +60,5 @@ struct JsonValue *json_create_string(struct Arena *arena,
 									 const char *string_value);
 struct JsonValue *json_create_array(struct Arena *arena);
 struct JsonValue *json_create_object(struct Arena *arena);
+
+#endif // JSON_H

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef LOG_H
+#define LOG_H
 
 #define LOG_MAX_LINE_LENGTH 1024
 #define TIME_FMT "%Y-%m-%d %H:%M:%S\n"
@@ -19,3 +20,5 @@ void logger_init(LogLevel level, const char *file_path);
 
 // Cleanup logger resources
 void logger_cleanup(void);
+
+#endif // LOG_H
